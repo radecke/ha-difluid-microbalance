@@ -58,6 +58,16 @@ async def _timer_start(coordinator: DifluidCoordinator) -> None:
     await _click_until(coordinator, DeviceState.TIMING)
 
 
+async def _timer_stop(coordinator: DifluidCoordinator) -> None:
+    """DLink press, then ask for the state so the stop is seen at once
+    (the brew tracker otherwise notices it only by the timer stalling)."""
+    await coordinator.async_send(CMD_TIMER_STOP)
+    try:
+        await coordinator.async_request_status()
+    except HomeAssistantError:
+        pass  # the stop itself went out; the stall check still catches it
+
+
 async def _timer_reset(coordinator: DifluidCoordinator) -> None:
     state = await coordinator.async_request_status()
     if state == DeviceState.TIMING:
@@ -87,7 +97,7 @@ BUTTONS: tuple[DifluidButtonEntityDescription, ...] = (
     DifluidButtonEntityDescription(
         key="timer_stop",
         translation_key="timer_stop",
-        press_fn=lambda c: _send_frame(c, CMD_TIMER_STOP),
+        press_fn=_timer_stop,
     ),
     DifluidButtonEntityDescription(
         key="timer_reset", translation_key="timer_reset", press_fn=_timer_reset

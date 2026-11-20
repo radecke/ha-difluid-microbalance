@@ -53,6 +53,24 @@
           "auto_stop_timing_trigger": "Auto-Stopp",
           "timer_ready": "Timer bereit"
         }
+      },
+      "last_dose": {
+        "name": "Letzte Dosis"
+      },
+      "last_yield": {
+        "name": "Letzte Ausbeute"
+      },
+      "brew_ratio": {
+        "name": "Brühverhältnis"
+      },
+      "brew_duration": {
+        "name": "Bezugsdauer"
+      },
+      "brew_count": {
+        "name": "Anzahl Bezüge"
+      },
+      "coffee_total": {
+        "name": "Kaffee gemahlen gesamt"
       }
     },
     "binary_sensor": {
@@ -110,6 +128,11 @@
           "gering": "Gering"
         }
       }
+    },
+    "number": {
+      "dose_correction": {
+        "name": "Dosis korrigieren"
+      }
     }
   },
   "exceptions": {
@@ -121,6 +144,36 @@
     },
     "timer_state": {
       "message": "Timer hat den erwarteten Zustand nicht erreicht (Gerätezustand {state})."
+    },
+    "no_brew": {
+      "message": "Es wurde noch kein Bezug aufgezeichnet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bezugserkennung",
+        "description": "Ein Bezug ist die Zeit, in der der Timer der Waage läuft, plus ein kurzer Nachlauf. Als Dosis gilt das letzte stabile Gewicht im Dosisbereich vor dem Bezug.",
+        "data": {
+          "tail_seconds": "Nachlauf nach Timer-Stopp",
+          "min_duration": "Mindestdauer eines Bezugs",
+          "min_yield": "Mindestmenge im Becher",
+          "dose_min": "Dosisbereich von",
+          "dose_max": "Dosisbereich bis",
+          "stability_tolerance": "Toleranz für stabile Dosis (±)",
+          "stability_seconds": "Dosis mindestens stabil für",
+          "dose_lookback_minutes": "Dosis höchstens so lange vor dem Bezug"
+        },
+        "data_description": {
+          "tail_seconds": "Nach dem Timer-Stopp wird weiter aufgezeichnet, damit Nachtropfen mitzählt.",
+          "min_duration": "Kürzere Timerläufe werden nicht als Bezug gespeichert.",
+          "min_yield": "Läufe mit weniger Gewicht werden nicht als Bezug gespeichert.",
+          "dose_lookback_minutes": "Ältere Gewichtsplateaus werden nicht als Dosis verwendet."
+        }
+      }
+    },
+    "error": {
+      "dose_range": "Der Dosisbereich muss unten kleiner sein als oben."
     }
   }
 }

@@ -53,6 +53,24 @@
           "auto_stop_timing_trigger": "Auto stop",
           "timer_ready": "Timer ready"
         }
+      },
+      "last_dose": {
+        "name": "Last dose"
+      },
+      "last_yield": {
+        "name": "Last yield"
+      },
+      "brew_ratio": {
+        "name": "Brew ratio"
+      },
+      "brew_duration": {
+        "name": "Brew duration"
+      },
+      "brew_count": {
+        "name": "Brew count"
+      },
+      "coffee_total": {
+        "name": "Coffee ground total"
       }
     },
     "binary_sensor": {
@@ -110,6 +128,11 @@
           "gering": "Gering"
         }
       }
+    },
+    "number": {
+      "dose_correction": {
+        "name": "Dose correction"
+      }
     }
   },
   "exceptions": {
@@ -121,6 +144,36 @@
     },
     "timer_state": {
       "message": "Timer did not reach the expected state (device state {state})."
+    },
+    "no_brew": {
+      "message": "No brew recorded yet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Brew detection",
+        "description": "A brew is the time the scale's timer runs, plus a short capture tail. The dose is the last stable weight in the dose range before the brew.",
+        "data": {
+          "tail_seconds": "Capture tail after timer stop",
+          "min_duration": "Minimum brew duration",
+          "min_yield": "Minimum yield",
+          "dose_min": "Dose range minimum",
+          "dose_max": "Dose range maximum",
+          "stability_tolerance": "Dose stability tolerance (±)",
+          "stability_seconds": "Dose stable for at least",
+          "dose_lookback_minutes": "Dose lookback before brew start"
+        },
+        "data_description": {
+          "tail_seconds": "Keeps recording after the timer stops so drips count towards the yield.",
+          "min_duration": "Shorter timer runs are not saved as brews.",
+          "min_yield": "Runs with less yield are not saved as brews.",
+          "dose_lookback_minutes": "Older weight plateaus are not used as the dose."
+        }
+      }
+    },
+    "error": {
+      "dose_range": "Dose range minimum must be lower than the maximum."
     }
   }
 }

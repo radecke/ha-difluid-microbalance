@@ -10,13 +10,63 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
+from homeassistant.const import CONF_ADDRESS, UnitOfMass, UnitOfTime
+from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .const import (
+    CONF_DOSE_LOOKBACK,
+    CONF_DOSE_MAX,
+    CONF_DOSE_MIN,
+    CONF_MIN_DURATION,
+    CONF_MIN_YIELD,
+    CONF_STABILITY_SECONDS,
+    CONF_STABILITY_TOLERANCE,
+    CONF_TAIL_SECONDS,
+    DEFAULT_OPTIONS,
     DOMAIN,
     LOCAL_NAME_PREFIX,
     SERVICE_UUID,
+)
+
+
+def _number(
+    minimum: float, maximum: float, step: float, unit: str
+) -> NumberSelector:
+    return NumberSelector(
+        NumberSelectorConfig(
+            min=minimum,
+            max=maximum,
+            step=step,
+            unit_of_measurement=unit,
+            mode=NumberSelectorMode.BOX,
+        )
+    )
+
+
+_SECONDS = UnitOfTime.SECONDS
+_GRAMS = UnitOfMass.GRAMS
+OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_TAIL_SECONDS): _number(0, 30, 0.5, _SECONDS),
+        vol.Required(CONF_MIN_DURATION): _number(0, 120, 1, _SECONDS),
+        vol.Required(CONF_MIN_YIELD): _number(0, 100, 0.5, _GRAMS),
+        vol.Required(CONF_DOSE_MIN): _number(1, 100, 0.5, _GRAMS),
+        vol.Required(CONF_DOSE_MAX): _number(1, 100, 0.5, _GRAMS),
+        vol.Required(CONF_STABILITY_TOLERANCE): _number(0.1, 5, 0.1, _GRAMS),
+        vol.Required(CONF_STABILITY_SECONDS): _number(1, 30, 0.5, _SECONDS),
+        vol.Required(CONF_DOSE_LOOKBACK): _number(1, 240, 1, UnitOfTime.MINUTES),
+    }
 )
 
 
@@ -30,6 +80,12 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for DiFluid Microbalance."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow (brew detection thresholds)."""
+        return DifluidOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the flow."""
@@ -100,3 +156,24 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
+
+
+class DifluidOptionsFlow(OptionsFlow):
+    """Brew detection thresholds."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show and validate the options."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if user_input[CONF_DOSE_MIN] >= user_input[CONF_DOSE_MAX]:
+                errors["base"] = "dose_range"
+            else:
+                return self.async_create_entry(data=user_input)
+        values = {**DEFAULT_OPTIONS, **self.config_entry.options, **(user_input or {})}
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, values),
+            errors=errors,
+        )

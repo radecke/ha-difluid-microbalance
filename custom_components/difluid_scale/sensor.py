@@ -12,12 +12,13 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .brews import BrewHistory
 from .coordinator import DifluidConfigEntry, DifluidData
-from .entity import DifluidEntity
+from .entity import DifluidBrewEntity, DifluidEntity
 from .protocol import DeviceState, WeightUnit
 
 PARALLEL_UPDATES = 0
@@ -117,6 +118,74 @@ SENSORS: tuple[DifluidSensorEntityDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class DifluidBrewSensorEntityDescription(SensorEntityDescription):
+    """Brew sensor description reading from the brew history."""
+
+    value_fn: Callable[[BrewHistory], float | int | None]
+
+
+def _last(key: str) -> Callable[[BrewHistory], float | int | None]:
+    def _value(history: BrewHistory) -> float | int | None:
+        brew = history.last
+        return brew.get(key) if brew else None
+
+    return _value
+
+
+BREW_SENSORS: tuple[DifluidBrewSensorEntityDescription, ...] = (
+    DifluidBrewSensorEntityDescription(
+        key="last_dose",
+        translation_key="last_dose",
+        device_class=SensorDeviceClass.WEIGHT,
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_last("dose"),
+    ),
+    DifluidBrewSensorEntityDescription(
+        key="last_yield",
+        translation_key="last_yield",
+        device_class=SensorDeviceClass.WEIGHT,
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_last("yield"),
+    ),
+    DifluidBrewSensorEntityDescription(
+        key="brew_ratio",
+        translation_key="brew_ratio",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        value_fn=_last("ratio"),
+    ),
+    DifluidBrewSensorEntityDescription(
+        key="brew_duration",
+        translation_key="brew_duration",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_last("duration"),
+    ),
+    DifluidBrewSensorEntityDescription(
+        key="brew_count",
+        translation_key="brew_count",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda h: h.brew_count,
+    ),
+    DifluidBrewSensorEntityDescription(
+        key="coffee_total",
+        translation_key="coffee_total",
+        device_class=SensorDeviceClass.WEIGHT,
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=1,
+        value_fn=lambda h: round(h.coffee_total, 1),
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DifluidConfigEntry,
@@ -125,6 +194,9 @@ async def async_setup_entry(
     """Set up sensors."""
     coordinator = entry.runtime_data
     async_add_entities(DifluidSensor(coordinator, desc) for desc in SENSORS)
+    async_add_entities(
+        DifluidBrewSensor(coordinator, desc) for desc in BREW_SENSORS
+    )
 
 
 class DifluidSensor(DifluidEntity, SensorEntity):
@@ -141,3 +213,24 @@ class DifluidSensor(DifluidEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return extra attributes."""
         return self.entity_description.attrs_fn(self.coordinator.data)
+
+
+class DifluidBrewSensor(DifluidBrewEntity, SensorEntity):
+    """A brew result sensor (last brew, totals)."""
+
+    entity_description: DifluidBrewSensorEntityDescription
+
+    @property
+    def native_value(self) -> float | int | None:
+        """Return the value from the brew history."""
+        return self.entity_description.value_fn(self.coordinator.brews)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Brew count only: id and start of the newest brew (small)."""
+        if self.entity_description.key != "brew_count":
+            return None
+        brew = self.coordinator.brews.last
+        if brew is None:
+            return None
+        return {"last_brew_id": brew["id"], "last_brew_start": brew["start"]}

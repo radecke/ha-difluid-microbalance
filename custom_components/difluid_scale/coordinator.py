@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+import time
 
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
@@ -18,20 +19,27 @@ from bleak_retry_connector import (
 
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .brew import BrewResult, BrewTracker
+from .brews import BrewHistory, brew_config_from_options, brew_summary
 from .const import (
     ADVERTISEMENT_MAX_AGE,
+    BREW_TICK_INTERVAL,
     CHAR_UUID,
     CONNECT_RETRIES,
     CONNECT_RETRY_DELAY,
     DOMAIN,
+    SIGNAL_LIVE,
     STATUS_POLL_INTERVAL,
 )
+from .live import LIVE_IDLE, LiveBrew, end_message
 from .protocol import (
     CMD_AUTO_SEND_ON,
     CMD_GET_FIRMWARE,
@@ -44,6 +52,7 @@ from .protocol import (
     CMD_SETTINGS_AUTO_STOP_TIMING,
     CMD_SETTINGS_WEIGHT_UNIT,
     FUNC_INFO,
+    DeviceState,
     Frame,
     FrameBuffer,
     SensorData,
@@ -76,6 +85,21 @@ READ_SETTINGS = (
 INFO_SERIAL = "serial"
 INFO_MODEL = "model"
 INFO_FIRMWARE = "firmware"
+
+# Device states that tell the brew tracker the timer runs / does not run.
+# Others (e.g. taring) say nothing about the timer and are ignored.
+_TIMER_RUNNING_STATES = {DeviceState.TIMING}
+_TIMER_STOPPED_STATES = {
+    DeviceState.POWER_DOWN,
+    DeviceState.LOW_BATTERY_SHUTDOWN,
+    DeviceState.IDLE,
+    DeviceState.TIMER_PAUSE,
+    DeviceState.AUTO_STOP_TIMING_TRIGGER,
+    DeviceState.TIMER_READY,
+}
+# Stopped states in which the timer is back at 0 (a paused brew can no
+# longer be continued).
+_TIMER_RESET_STATES = {DeviceState.IDLE, DeviceState.TIMER_READY}
 
 type KeyEventListener = Callable[[str], None]
 
@@ -126,6 +150,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._info_waiters: dict[str, asyncio.Future[str]] = {}
         self.device_info: dict[str, str] = {}
         self._connecting = False
+        self.brew_tracker = BrewTracker(brew_config_from_options(dict(entry.options)))
+        self.brews = BrewHistory(hass, entry.entry_id, self._device_id)
+        self._cancel_brew_tick: CALLBACK_TYPE | None = None
+        self._live: LiveBrew | None = None
 
     @property
     def connected(self) -> bool:
@@ -156,16 +184,62 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             self._clear_advertisement_history()
         return cancel
 
+    @callback
+    def async_listen_ha_stop(self) -> CALLBACK_TYPE:
+        """Hand a pending brew over on HA stop too (entries are not unloaded).
+
+        Returns a remover for ``async_on_unload``; safe after the event fired.
+        """
+        cancel: CALLBACK_TYPE | None = None
+
+        async def _on_stop(_event: Event) -> None:
+            nonlocal cancel
+            cancel = None
+            await self.async_shutdown()
+
+        cancel = self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_stop)
+
+        @callback
+        def _remove() -> None:
+            nonlocal cancel
+            if cancel is not None:
+                cancel()
+                cancel = None
+
+        return _remove
+
+    @callback
+    def async_restore_brew(self) -> None:
+        """Take over a brew in progress from the previous instance (reload)."""
+        if (active := self.brews.take_active()) is None:
+            return
+        if self.brew_tracker.restore_active(active):
+            _LOGGER.debug("%s: brew in progress restored", self.address)
+            self._handle_brew_result(None)
+
     async def async_shutdown(self) -> None:
-        """Disconnect cleanly on unload."""
+        """Disconnect cleanly on unload or HA stop.
+
+        A brew in progress is not finalized: it is handed to the next
+        instance (reload) through the store, which continues it like after
+        a reconnect. Nothing of this instance acts after this point.
+        """
+        if self._unloading:
+            return  # also registered via async_on_unload
         self._unloading = True
         self._stop_poll()
+        self._stop_brew_tick()
+        self.brews.set_active(self.brew_tracker.export_active(time.time()))
+        if self._live is not None:
+            self._live = None
+            self._send_live(end_message(reason="unloaded"))
         client, self._client = self._client, None
         if client is not None and client.is_connected:
             try:
                 await client.disconnect()
             except BleakError as err:
                 _LOGGER.debug("%s: error during disconnect: %s", self.address, err)
+        await self.brews.async_flush()
         await super().async_shutdown()
 
     # -------------------------------------------------------------- connection
@@ -370,6 +444,12 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
 
     @callback
     def _async_handle_disconnect(self, client: BleakClientWithServiceCache) -> None:
+        if self._unloading:
+            # Unloaded (bleak reports our own disconnect late): the brew was
+            # handed over, nothing may park it or restart the tick here.
+            if self._client is client:
+                self._client = None
+            return
         if self._client is not client and self._client is not None:
             return  # stale callback from an older connection
         _LOGGER.debug("%s: disconnected", self.address)
@@ -377,6 +457,9 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._stop_poll()
         self._buffer.clear()
         self._serial.reset()
+        # A running brew is parked, not closed: it resumes if the scale comes
+        # back with the same running timer (see BrewTracker.disconnect).
+        self._handle_brew_result(self.brew_tracker.disconnect(time.time()))
         self.async_update_listeners()
         # Reconnect happens on the next advertisement; clear HA's history so
         # an unchanged advertisement (quick power cycle) is not dropped.
@@ -410,6 +493,8 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
 
     def _on_notification(self, _char: object, payload: bytearray) -> None:
         """Handle a notification; one packet may hold several frames."""
+        if self._unloading:
+            return
         changed = False
         sensor = self.data.sensor
         status = self.data.status
@@ -425,6 +510,12 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 ) != (sensor.weight_raw, sensor.flow_raw, sensor.timer_raw, sensor.unit):
                     changed = True
                 sensor = new_sensor
+                if (grams := new_sensor.weight_grams) is not None:
+                    self._handle_brew_result(
+                        self.brew_tracker.feed_sample(
+                            time.time(), grams, new_sensor.flow_rate, new_sensor.timer
+                        )
+                    )
                 if settings.get(CMD_SETTINGS_WEIGHT_UNIT) != new_sensor.unit:
                     settings = {**settings, CMD_SETTINGS_WEIGHT_UNIT: new_sensor.unit}
                     changed = True
@@ -433,6 +524,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                     changed = True
                 status = new_status
                 self._status_event.set()
+                self._feed_brew_state(new_status.state)
             elif (setting := parse_setting(frame)) is not None:
                 cmd, value = setting
                 if settings.get(cmd) != value:
@@ -462,6 +554,101 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             _LOGGER.debug("%s: key event %s", self.address, event)
             for listener in list(self._key_listeners):
                 listener(event)
+
+    # ---------------------------------------------------------------- brews
+
+    @callback
+    def _device_id(self) -> str | None:
+        device = dr.async_get(self.hass).async_get_device(
+            identifiers={(DOMAIN, self.address)}
+        )
+        return device.id if device else None
+
+    @callback
+    def _feed_brew_state(self, state: int) -> None:
+        if state in _TIMER_RUNNING_STATES:
+            running = True
+        elif state in _TIMER_STOPPED_STATES:
+            running = False
+        else:
+            return
+        self._handle_brew_result(
+            self.brew_tracker.feed_timer_state(
+                time.time(), running, reset=state in _TIMER_RESET_STATES
+            )
+        )
+
+    @callback
+    def _handle_brew_result(self, result: BrewResult | None) -> None:
+        """Store a finished brew; keep live data and the tick in step."""
+        if self._unloading:
+            return
+        tracker = self.brew_tracker
+        if result is not None:
+            brew = self.brews.async_add_result(result)
+            self._end_live(end_message(brew=brew_summary(brew)))
+        elif tracker.last_discard_reason:
+            _LOGGER.debug(
+                "%s: run discarded (%s)", self.address, tracker.last_discard_reason
+            )
+            self._end_live(
+                end_message(
+                    reason=tracker.last_discard_code,
+                    detail=tracker.last_discard_reason,
+                )
+            )
+            tracker.last_discard_reason = None
+            tracker.last_discard_code = None
+        if tracker.active and self._live is None:
+            self._live = LiveBrew(tracker)
+            self._send_live(self._live.start_message(tracker, time.time()))
+        elif not tracker.active and self._live is not None:
+            self._end_live(end_message(reason="ended"))
+        if tracker.active and self._cancel_brew_tick is None:
+            self._cancel_brew_tick = async_track_time_interval(
+                self.hass, self._async_brew_tick, BREW_TICK_INTERVAL
+            )
+        elif not tracker.active:
+            self._stop_brew_tick()
+
+    @callback
+    def _async_brew_tick(self, _now: datetime) -> None:
+        """Stall check, end of tail, parking backstop; coalesced live push."""
+        if self._unloading:
+            return
+        now = time.time()
+        self._handle_brew_result(self.brew_tracker.tick(now))
+        if self._live is not None:
+            if (message := self._live.update_message(self.brew_tracker, now)):
+                self._send_live(message)
+
+    @callback
+    def _end_live(self, message: dict) -> None:
+        if self._live is None:
+            return
+        # Points recorded since the last tick are not sent: the card shows
+        # the stored brew (full profile) next.
+        self._live = None
+        self._send_live(message)
+
+    @callback
+    def _send_live(self, message: dict) -> None:
+        async_dispatcher_send(
+            self.hass, SIGNAL_LIVE.format(self.config_entry.entry_id), message
+        )
+
+    @callback
+    def live_snapshot(self) -> dict:
+        """What a new live subscriber gets first."""
+        if self._live is None:
+            return {"type": LIVE_IDLE}
+        return self._live.snapshot(self.brew_tracker, time.time())
+
+    @callback
+    def _stop_brew_tick(self) -> None:
+        if self._cancel_brew_tick is not None:
+            self._cancel_brew_tick()
+            self._cancel_brew_tick = None
 
     def _handle_info_frame(self, frame: Frame) -> None:
         """Resolve pending device-info requests from Func 0 responses."""

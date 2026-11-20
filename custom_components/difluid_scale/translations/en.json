@@ -1,0 +1,138 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "description": "Choose a scale to set up",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "bluetooth_confirm": {
+        "description": "Do you want to set up {name}?"
+      }
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "already_in_progress": "Configuration flow is already in progress",
+      "no_devices_found": "No scale found. Turn the scale on and try again.",
+      "not_supported": "Device not supported"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "weight": {
+        "name": "Weight"
+      },
+      "flow_rate": {
+        "name": "Flow rate"
+      },
+      "timer": {
+        "name": "Timer"
+      },
+      "battery": {
+        "name": "Battery"
+      },
+      "device_state": {
+        "name": "Device state",
+        "state": {
+          "power_down": "Power down",
+          "charging": "Charging",
+          "low_power_mode_1": "Low power mode 1",
+          "low_battery_shutdown": "Low-battery shutdown",
+          "startup": "Starting up",
+          "idle": "Idle",
+          "show_device_info": "Showing device info",
+          "tare_in_progress": "Taring",
+          "ota_in_progress": "Update in progress",
+          "ota_failed": "Update failed",
+          "timing": "Timing",
+          "timer_pause": "Timer paused",
+          "reserved": "Reserved",
+          "low_power_mode_2": "Low power mode 2",
+          "auto_stop_timing_trigger": "Auto stop",
+          "timer_ready": "Timer ready"
+        }
+      }
+    },
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      }
+    },
+    "button": {
+      "tare": {
+        "name": "Tare"
+      },
+      "timer_start": {
+        "name": "Start timer"
+      },
+      "timer_stop": {
+        "name": "Stop timer"
+      },
+      "timer_reset": {
+        "name": "Reset timer"
+      }
+    },
+    "event": {
+      "key_press": {
+        "name": "Key press",
+        "state_attributes": {
+          "event_type": {
+            "name": "Event type",
+            "state": {
+              "power_click": "Power click",
+              "timer_click": "Timer click",
+              "power_double": "Power double click",
+              "timer_double": "Timer double click",
+              "power_long": "Power long press",
+              "timer_long": "Timer long press",
+              "timer_press": "Timer press"
+            }
+          }
+        }
+      }
+    },
+    "switch": {
+      "auto_detect_timing": {
+        "name": "Auto timer start"
+      },
+      "auto_stop_timing": {
+        "name": "Auto timer stop"
+      }
+    },
+    "select": {
+      "weight_unit": {
+        "name": "Weight unit",
+        "state": {
+          "gram": "Gram",
+          "ounce": "Ounce",
+          "gering": "Gering"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_connected": {
+      "message": "The scale is not connected."
+    },
+    "write_failed": {
+      "message": "Failed to send to the scale: {error}"
+    },
+    "timer_state": {
+      "message": "Timer did not reach the expected state (device state {state})."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Connection",
+        "description": "The scale does not power itself off while connected. After the idle timeout without weight change the connection is dropped; reconnecting is held back for the cooldown so the scale's auto-off can take effect.",
+        "data": {
+          "idle_timeout": "Disconnect after idle (seconds, 0 = never)",
+          "reconnect_cooldown": "Reconnect cooldown (seconds)"
+        }
+      }
+    }
+  }
+}

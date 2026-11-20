@@ -1,0 +1,138 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "description": "Waage auswählen",
+        "data": {
+          "address": "Gerät"
+        }
+      },
+      "bluetooth_confirm": {
+        "description": "Möchtest du {name} einrichten?"
+      }
+    },
+    "abort": {
+      "already_configured": "Gerät ist bereits eingerichtet",
+      "already_in_progress": "Einrichtung läuft bereits",
+      "no_devices_found": "Keine Waage im Netzwerk gefunden. Waage einschalten und erneut versuchen.",
+      "not_supported": "Gerät nicht unterstützt"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "weight": {
+        "name": "Gewicht"
+      },
+      "flow_rate": {
+        "name": "Durchfluss"
+      },
+      "timer": {
+        "name": "Timer"
+      },
+      "battery": {
+        "name": "Akku"
+      },
+      "device_state": {
+        "name": "Gerätezustand",
+        "state": {
+          "power_down": "Aus",
+          "charging": "Lädt",
+          "low_power_mode_1": "Energiesparen 1",
+          "low_battery_shutdown": "Akku leer",
+          "startup": "Startet",
+          "idle": "Bereit",
+          "show_device_info": "Geräteinfo",
+          "tare_in_progress": "Tariert",
+          "ota_in_progress": "Update läuft",
+          "ota_failed": "Update fehlgeschlagen",
+          "timing": "Timer läuft",
+          "timer_pause": "Timer pausiert",
+          "reserved": "Reserviert",
+          "low_power_mode_2": "Energiesparen 2",
+          "auto_stop_timing_trigger": "Auto-Stopp",
+          "timer_ready": "Timer bereit"
+        }
+      }
+    },
+    "binary_sensor": {
+      "connected": {
+        "name": "Verbunden"
+      }
+    },
+    "button": {
+      "tare": {
+        "name": "Tara"
+      },
+      "timer_start": {
+        "name": "Timer starten"
+      },
+      "timer_stop": {
+        "name": "Timer stoppen"
+      },
+      "timer_reset": {
+        "name": "Timer zurücksetzen"
+      }
+    },
+    "event": {
+      "key_press": {
+        "name": "Taste an der Waage",
+        "state_attributes": {
+          "event_type": {
+            "name": "Ereignistyp",
+            "state": {
+              "power_click": "Power-Taste kurz",
+              "timer_click": "Timer-Taste kurz",
+              "power_double": "Power-Taste doppelt",
+              "timer_double": "Timer-Taste doppelt",
+              "power_long": "Power-Taste lang",
+              "timer_long": "Timer-Taste lang",
+              "timer_press": "Timer-Taste gedrückt"
+            }
+          }
+        }
+      }
+    },
+    "switch": {
+      "auto_detect_timing": {
+        "name": "Auto-Timerstart"
+      },
+      "auto_stop_timing": {
+        "name": "Auto-Timerstopp"
+      }
+    },
+    "select": {
+      "weight_unit": {
+        "name": "Einheit",
+        "state": {
+          "gram": "Gramm",
+          "ounce": "Unze",
+          "gering": "Gering"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_connected": {
+      "message": "Die Waage ist nicht verbunden."
+    },
+    "write_failed": {
+      "message": "Senden an die Waage fehlgeschlagen: {error}"
+    },
+    "timer_state": {
+      "message": "Timer hat den erwarteten Zustand nicht erreicht (Gerätezustand {state})."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Verbindung",
+        "description": "Die Waage schaltet sich nicht selbst ab, solange sie verbunden ist. Nach der Leerlaufzeit ohne Gewichtsänderung wird die Verbindung getrennt; für die Sperrzeit wird nicht neu verbunden, damit die Abschaltautomatik der Waage greift.",
+        "data": {
+          "idle_timeout": "Trennen nach Leerlauf (Sekunden, 0 = nie)",
+          "reconnect_cooldown": "Sperrzeit bis zur Neuverbindung (Sekunden)"
+        }
+      }
+    }
+  }
+}

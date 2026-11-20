@@ -122,17 +122,5 @@
     "timer_state": {
       "message": "Timer hat den erwarteten Zustand nicht erreicht (Gerätezustand {state})."
     }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Verbindung",
-        "description": "Die Waage schaltet sich nicht selbst ab, solange sie verbunden ist. Nach der Leerlaufzeit ohne Gewichtsänderung wird die Verbindung getrennt; für die Sperrzeit wird nicht neu verbunden, damit die Abschaltautomatik der Waage greift.",
-        "data": {
-          "idle_timeout": "Trennen nach Leerlauf (Sekunden, 0 = nie)",
-          "reconnect_cooldown": "Sperrzeit bis zur Neuverbindung (Sekunden)"
-        }
-      }
-    }
   }
 }

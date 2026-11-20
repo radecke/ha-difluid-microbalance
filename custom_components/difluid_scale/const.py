@@ -17,20 +17,13 @@ CHAR_UUID: Final = "0000aa01-0000-1000-8000-00805f9b34fb"
 
 LOCAL_NAME_PREFIX: Final = "Microbalance"
 
-STATUS_POLL_INTERVAL: Final = timedelta(seconds=60)
+STATUS_POLL_INTERVAL: Final = timedelta(minutes=5)
 
-# The scale does not power itself off while a BLE connection is held. After
-# the idle timeout without weight change (timer not running) the connection is
-# dropped and reconnects are held back for the cooldown, so the scale's own
-# auto-off can take effect. Both are options of the config entry.
-CONF_IDLE_TIMEOUT: Final = "idle_timeout"
-CONF_RECONNECT_COOLDOWN: Final = "reconnect_cooldown"
-DEFAULT_IDLE_TIMEOUT: Final = 120  # seconds, 0 = never disconnect
-DEFAULT_RECONNECT_COOLDOWN: Final = 60  # seconds
-IDLE_CHECK_INTERVAL: Final = timedelta(seconds=5)
-# Weight changes below this (grams) are measurement noise, not activity.
-ACTIVITY_THRESHOLD_G: Final = 0.5
+# Only connect when the scale advertised within this many seconds. HA keeps a
+# switched-off scale in its history for minutes; connecting to it then blocks
+# for a long time and hides the next real advertisement.
+ADVERTISEMENT_MAX_AGE: Final = 10  # seconds
 
 # Extra connect attempts after a failure while the scale is still in range.
 CONNECT_RETRIES: Final = 3
-CONNECT_RETRY_DELAY: Final = 3  # seconds
+CONNECT_RETRY_DELAY: Final = 1  # seconds

@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="custom_components/difluid_scale/brand/dark_logo@2x.png">
+    <img alt="DiFluid Microbalance" src="custom_components/difluid_scale/brand/logo@2x.png" width="412">
+  </picture>
+</p>
+
 # DiFluid Microbalance for Home Assistant
 
 A Home Assistant custom integration for the **DiFluid Microbalance** coffee scale over Bluetooth Low Energy.
@@ -47,13 +54,6 @@ Copy `custom_components/difluid_scale` into your `config/custom_components/` fol
 Requires a working [Bluetooth](https://www.home-assistant.io/integrations/bluetooth/) setup with an adapter or proxy that supports **active connections**.
 
 Turn the scale on. Home Assistant discovers it automatically; confirm the discovery. You can also add it manually via **Settings → Devices & services → Add integration → DiFluid Microbalance**.
-
-## Options
-
-| Option | Default | Description |
-|---|---|---|
-| Disconnect after idle | 120 s | Drops the connection after this time without weight change, key press or command (a running timer keeps it alive). `0` = never. Lets the scale's auto-off work. |
-| Reconnect cooldown | 60 s | After an idle disconnect, reconnecting is held back for this time. |
 
 ## Limitations
 

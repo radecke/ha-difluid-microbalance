@@ -10,20 +10,10 @@ from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import (
-    ConfigEntry,
-    ConfigFlow,
-    ConfigFlowResult,
-    OptionsFlow,
-)
-from homeassistant.core import callback
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS
 
 from .const import (
-    CONF_IDLE_TIMEOUT,
-    CONF_RECONNECT_COOLDOWN,
-    DEFAULT_IDLE_TIMEOUT,
-    DEFAULT_RECONNECT_COOLDOWN,
     DOMAIN,
     LOCAL_NAME_PREFIX,
     SERVICE_UUID,
@@ -40,12 +30,6 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for DiFluid Microbalance."""
 
     VERSION = 1
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        """Return the options flow."""
-        return DifluidOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the flow."""
@@ -116,31 +100,3 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
-
-class DifluidOptionsFlow(OptionsFlow):
-    """Idle disconnect and reconnect cooldown."""
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Manage the options."""
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-        options = self.config_entry.options
-        return self.async_show_form(
-            step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_IDLE_TIMEOUT,
-                        default=options.get(CONF_IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
-                    vol.Required(
-                        CONF_RECONNECT_COOLDOWN,
-                        default=options.get(
-                            CONF_RECONNECT_COOLDOWN, DEFAULT_RECONNECT_COOLDOWN
-                        ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3600)),
-                }
-            ),
-        )

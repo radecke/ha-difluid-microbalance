@@ -10,6 +10,7 @@ import logging
 
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
+from bluetooth_data_tools import monotonic_time_coarse
 from bleak_retry_connector import (
     BleakClientWithServiceCache,
     establish_connection,
@@ -24,20 +25,14 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
-    ACTIVITY_THRESHOLD_G,
+    ADVERTISEMENT_MAX_AGE,
     CHAR_UUID,
-    CONF_IDLE_TIMEOUT,
-    CONF_RECONNECT_COOLDOWN,
     CONNECT_RETRIES,
     CONNECT_RETRY_DELAY,
-    DEFAULT_IDLE_TIMEOUT,
-    DEFAULT_RECONNECT_COOLDOWN,
     DOMAIN,
-    IDLE_CHECK_INTERVAL,
     STATUS_POLL_INTERVAL,
 )
 from .protocol import (
-    DeviceState,
     CMD_AUTO_SEND_ON,
     CMD_GET_FIRMWARE,
     CMD_GET_MODEL,
@@ -130,10 +125,6 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._serial = SerialAssembler()
         self._info_waiters: dict[str, asyncio.Future[str]] = {}
         self.device_info: dict[str, str] = {}
-        self._last_activity = 0.0
-        self._activity_weight: float | None = None
-        self._cooldown_until = 0.0
-        self._cancel_idle: CALLBACK_TYPE | None = None
         self._connecting = False
 
     @property
@@ -156,11 +147,13 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             bluetooth.BluetoothCallbackMatcher(address=self.address, connectable=True),
             bluetooth.BluetoothScanningMode.ACTIVE,
         )
-        # Scale may already be on and advertising when HA starts.
-        if bluetooth.async_ble_device_from_address(
-            self.hass, self.address, connectable=True
-        ):
+        # Scale may already be on and advertising when HA starts. If HA only
+        # remembers an old advertisement, clear it so the next (unchanged)
+        # one after power-on reaches the callback.
+        if self._advertisement_fresh():
             self._schedule_connect()
+        else:
+            self._clear_advertisement_history()
         return cancel
 
     async def async_shutdown(self) -> None:
@@ -184,18 +177,48 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         change: bluetooth.BluetoothChange,
     ) -> None:
         """Connect when the scale advertises and we are not connected."""
-        if not self.connected and not self._connecting:
-            self._schedule_connect()
+        _LOGGER.debug(
+            "%s: advertisement (rssi %s, connected=%s, connecting=%s)",
+            self.address,
+            service_info.rssi,
+            self.connected,
+            self._connecting,
+        )
+        if self.connected or self._connecting:
+            return
+        self._schedule_connect()
 
-    @property
-    def in_cooldown(self) -> bool:
-        """True while reconnects are held back after an idle disconnect."""
-        return self.hass.loop.time() < self._cooldown_until
+    @callback
+    def _clear_advertisement_history(self) -> None:
+        """Let the next advertisement through HA's change detection.
+
+        The scale's advertisement never changes, so HA's Bluetooth manager
+        drops it as a duplicate and no callback fires after a quick power
+        cycle. Clearing the history makes the next one count as new."""
+        bluetooth.async_clear_advertisement_history(self.hass, self.address)
+
+    @callback
+    def _advertisement_fresh(self) -> bool:
+        """True if the scale advertised within ADVERTISEMENT_MAX_AGE."""
+        info = bluetooth.async_last_service_info(
+            self.hass, self.address, connectable=True
+        )
+        return (
+            info is not None
+            and monotonic_time_coarse() - info.time <= ADVERTISEMENT_MAX_AGE
+        )
 
     @callback
     def _schedule_connect(self) -> None:
-        if self._unloading or self.in_cooldown or self._connecting:
+        if self._unloading or self._connecting:
+            _LOGGER.debug(
+                "%s: connect skipped (unloading=%s, connecting=%s)",
+                self.address,
+                self._unloading,
+                self._connecting,
+            )
             return
+        _LOGGER.debug("%s: connecting", self.address)
         self._connecting = True
         self.config_entry.async_create_background_task(
             self.hass,
@@ -211,14 +234,8 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             for attempt in range(1 + CONNECT_RETRIES):
                 if await self._async_connect():
                     return
-                if (
-                    self._unloading
-                    or self.in_cooldown
-                    or not bluetooth.async_address_present(
-                        self.hass, self.address, connectable=True
-                    )
-                ):
-                    return
+                if self._unloading or not self._advertisement_fresh():
+                    break
                 if attempt < CONNECT_RETRIES:
                     _LOGGER.debug(
                         "%s: retrying connect in %ss (%s/%s)",
@@ -228,6 +245,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                         CONNECT_RETRIES,
                     )
                     await asyncio.sleep(CONNECT_RETRY_DELAY)
+            # Not connected: let the next advertisement trigger a new attempt.
+            _LOGGER.debug("%s: not connected, waiting for advertisement", self.address)
+            if not self._unloading:
+                self._clear_advertisement_history()
         finally:
             self._connecting = False
 
@@ -238,7 +259,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         async with self._connect_lock:
             if self.connected:
                 return True
-            if self._unloading or self.in_cooldown:
+            if self._unloading:
                 return True
             ble_device: BLEDevice | None = bluetooth.async_ble_device_from_address(
                 self.hass, self.address, connectable=True
@@ -274,8 +295,6 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 return False
 
             _LOGGER.debug("%s: connected", self.address)
-            self._last_activity = self.hass.loop.time()
-            self._activity_weight = None
             self._start_poll()
             self.async_update_listeners()
             self.config_entry.async_create_background_task(
@@ -359,7 +378,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._buffer.clear()
         self._serial.reset()
         self.async_update_listeners()
-        # Reconnect happens on the next advertisement.
+        # Reconnect happens on the next advertisement; clear HA's history so
+        # an unchanged advertisement (quick power cycle) is not dropped.
+        if not self._unloading:
+            self._clear_advertisement_history()
 
     # ------------------------------------------------------------- status poll
 
@@ -369,54 +391,12 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._cancel_poll = async_track_time_interval(
             self.hass, self._async_poll_status, STATUS_POLL_INTERVAL
         )
-        self._cancel_idle = async_track_time_interval(
-            self.hass, self._async_check_idle, IDLE_CHECK_INTERVAL
-        )
 
     @callback
     def _stop_poll(self) -> None:
         if self._cancel_poll is not None:
             self._cancel_poll()
             self._cancel_poll = None
-        if self._cancel_idle is not None:
-            self._cancel_idle()
-            self._cancel_idle = None
-
-    async def _async_check_idle(self, _now: datetime) -> None:
-        """Drop an idle connection so the scale can power itself off."""
-        if not self.connected:
-            return
-        status = self.data.status
-        if status is not None and status.state in (
-            DeviceState.TIMING,
-            DeviceState.TIMER_READY,
-        ):
-            self._last_activity = self.hass.loop.time()
-            return
-        idle_timeout = self.config_entry.options.get(
-            CONF_IDLE_TIMEOUT, DEFAULT_IDLE_TIMEOUT
-        )
-        if not idle_timeout:
-            return
-        cooldown = self.config_entry.options.get(
-            CONF_RECONNECT_COOLDOWN, DEFAULT_RECONNECT_COOLDOWN
-        )
-        now = self.hass.loop.time()
-        if now - self._last_activity < idle_timeout:
-            return
-        _LOGGER.debug(
-            "%s: idle for %ss, disconnecting; reconnect held back %ss",
-            self.address,
-            int(now - self._last_activity),
-            int(cooldown),
-        )
-        self._cooldown_until = now + cooldown
-        client = self._client
-        if client is not None:
-            try:
-                await client.disconnect()
-            except BleakError as err:
-                _LOGGER.debug("%s: idle disconnect failed: %s", self.address, err)
 
     async def _async_poll_status(self, _now: datetime) -> None:
         if not self.connected:
@@ -437,16 +417,6 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         events: list[str] = []
         for frame in self._buffer.feed(bytes(payload)):
             if (new_sensor := parse_sensor(frame)) is not None:
-                weight = new_sensor.weight_grams
-                if weight is None:
-                    weight = new_sensor.weight
-                if (
-                    self._activity_weight is None
-                    or abs(weight - self._activity_weight) >= ACTIVITY_THRESHOLD_G
-                ):
-                    # Ignore measurement noise (0.1-0.2 g jumps observed).
-                    self._activity_weight = weight
-                    self._last_activity = self.hass.loop.time()
                 if sensor is None or (
                     new_sensor.weight_raw,
                     new_sensor.flow_raw,
@@ -472,7 +442,6 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 # App command echoes yield None and are ignored.
                 if (event := parse_key_event(frame)) is not None:
                     events.append(event)
-                    self._last_activity = self.hass.loop.time()
             elif frame.func == FUNC_INFO:
                 self._handle_info_frame(frame)
             else:
@@ -538,8 +507,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         return status.state if status else None
 
     async def async_send(self, frame: bytes) -> None:
-        """Write a frame; an app command counts as activity."""
-        self._last_activity = self.hass.loop.time()
+        """Write a frame."""
         await self._async_write(frame)
 
     async def _async_write(self, frame: bytes) -> None:

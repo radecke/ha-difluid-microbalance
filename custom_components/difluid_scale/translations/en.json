@@ -122,17 +122,5 @@
     "timer_state": {
       "message": "Timer did not reach the expected state (device state {state})."
     }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Connection",
-        "description": "The scale does not power itself off while connected. After the idle timeout without weight change the connection is dropped; reconnecting is held back for the cooldown so the scale's auto-off can take effect.",
-        "data": {
-          "idle_timeout": "Disconnect after idle (seconds, 0 = never)",
-          "reconnect_cooldown": "Reconnect cooldown (seconds)"
-        }
-      }
-    }
   }
 }

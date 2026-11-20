@@ -25,11 +25,18 @@ Tested with model `DFT-S101`, firmware `V320` and `V326`.
 
 ## Installation
 
-### HACS
+### HACS (recommended)
+
+1. In HACS, search for **DiFluid Microbalance**.
+2. Download it and restart Home Assistant.
+
+### HACS custom repository (fallback)
+
+If the integration does not show up in the search yet:
 
 1. In HACS, open the menu → **Custom repositories**.
 2. Add `https://github.com/radecke/ha-difluid-microbalance` with type **Integration**.
-3. Install **DiFluid Microbalance** and restart Home Assistant.
+3. Download **DiFluid Microbalance** and restart Home Assistant.
 
 ### Manual
 

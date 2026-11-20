@@ -9,6 +9,9 @@
 
 A Home Assistant custom integration for the **DiFluid Microbalance** coffee scale over Bluetooth Low Energy.
 It shows weight, flow rate, brew timer and battery live, and lets you tare and control the timer remotely.
+It also records every brew automatically: dose, yield, ratio, brew time and the full flow profile, with sensors for the latest brew
+and running totals (brew count, coffee ground). Each brew fires an event for your own automations.
+A bundled dashboard card draws the flow curve live while you brew and lets you browse and replay the last 20 brews.
 
 Tested with model `DFT-S101`, firmware `V320` and `V326`.
 

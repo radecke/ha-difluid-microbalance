@@ -33,6 +33,8 @@ Tested with model `DFT-S101`, firmware `V320` and `V326`.
 | Auto timer start / Auto timer stop | Switches for the scale's "auto detect / auto stop timing" settings |
 | Weight unit | Select: gram / ounce / gering (third unit as named in the DiFluid protocol; no gram conversion documented, weight shows no value in this mode) |
 
+Brew entities (last dose, yield, ratio, brew duration, brew count, coffee ground total, dose correction): see [Brew detection and brew card](#brew-detection-and-brew-card-030) below.
+
 ## Brew detection and brew card (0.3.0)
 
 The integration records each brew automatically. Brew detection follows the **scale's own timer**:

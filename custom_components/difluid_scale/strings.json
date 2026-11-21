@@ -71,6 +71,64 @@
       },
       "coffee_total": {
         "name": "Coffee ground total"
+      },
+      "stop_latency": {
+        "name": "Stop latency"
+      },
+      "stop_drip": {
+        "name": "Stop drip"
+      },
+      "stop_samples": {
+        "name": "Stop learning samples"
+      },
+      "stop_deviation": {
+        "name": "Stop deviation",
+        "state_attributes": {
+          "target": {
+            "name": "Target yield"
+          },
+          "cut_weight": {
+            "name": "Weight at cut"
+          },
+          "cut_flow": {
+            "name": "Flow at cut"
+          },
+          "predicted_overshoot": {
+            "name": "Predicted overshoot"
+          },
+          "lead": {
+            "name": "Look-ahead"
+          },
+          "final_yield": {
+            "name": "Settled yield"
+          },
+          "overshoot": {
+            "name": "Overshoot"
+          },
+          "accepted": {
+            "name": "Learned"
+          },
+          "reason": {
+            "name": "Not learned because",
+            "state": {
+              "outlier": "Outlier",
+              "not_settled": "Weight did not settle",
+              "brew_discarded": "Brew discarded",
+              "brew_truncated": "Brew truncated",
+              "cup_lifted": "Cup lifted before the drips settled"
+            }
+          },
+          "target_source": {
+            "name": "Target source",
+            "state": {
+              "ratio": "Ratio × dose",
+              "yield": "Fixed target yield"
+            }
+          },
+          "dose": {
+            "name": "Dose"
+          }
+        }
       }
     },
     "binary_sensor": {
@@ -90,6 +148,9 @@
       },
       "timer_reset": {
         "name": "Reset timer"
+      },
+      "reset_stop_learning": {
+        "name": "Reset stop learning"
       }
     },
     "event": {
@@ -135,6 +196,12 @@
     "number": {
       "dose_correction": {
         "name": "Dose correction"
+      },
+      "target_yield": {
+        "name": "Target yield"
+      },
+      "target_ratio": {
+        "name": "Target ratio"
       }
     }
   },
@@ -150,13 +217,22 @@
     },
     "no_brew": {
       "message": "No brew recorded yet."
+    },
+    "no_scale": {
+      "message": "No loaded DiFluid scale matches; pass entry_id or device_id."
+    },
+    "unknown_brew": {
+      "message": "No stored brew with id {brew_id}."
+    },
+    "cut_outside_profile": {
+      "message": "The brew's profile has no point at or before {cut_offset} s (or the brew has no yield)."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Brew detection",
-        "description": "A brew is the time the scale's timer runs, plus a short capture tail. The dose is the last stable weight in the dose range before the brew.",
+        "description": "A brew is the time the scale's timer runs, plus a short capture tail for the drips. The dose is detected automatically from weighing the beans before the brew. All values below have sensible defaults; change them only if brews are missed, split, or saved with a wrong dose. Optional: a stop switch for the adaptive auto-stop.",
         "data": {
           "tail_seconds": "Capture tail after timer stop",
           "min_duration": "Minimum brew duration",
@@ -165,18 +241,70 @@
           "dose_max": "Dose range maximum",
           "stability_tolerance": "Dose stability tolerance (±)",
           "stability_seconds": "Dose stable for at least",
-          "dose_lookback_minutes": "Dose lookback before brew start"
+          "dose_lookback_minutes": "Dose lookback before brew start",
+          "stop_switch": "Stop switch"
         },
         "data_description": {
-          "tail_seconds": "Keeps recording after the timer stops so drips count towards the yield.",
-          "min_duration": "Shorter timer runs are not saved as brews.",
-          "min_yield": "Runs with less yield are not saved as brews.",
-          "dose_lookback_minutes": "Older weight plateaus are not used as the dose."
+          "tail_seconds": "After the scale's timer stops, recording continues for this long so the drips still count towards the yield and the brew curve. Lifting the cup ends it early. With the auto-stop the timer is only stopped once the weight has settled, so the default of 3 s is enough.",
+          "min_duration": "Timer runs shorter than this are not saved as brews, e.g. a quick flush or an accidental timer start.",
+          "min_yield": "Runs that end with less than this in the cup are not saved as brews, e.g. the timer ran without coffee.",
+          "dose_min": "How the dose is found: put the dosing cup or portafilter on the scale, tare, add the beans. The last weight that stays stable inside this range before the brew counts as the dose. Set the range around your usual dose (default 12–25 g).",
+          "dose_max": "Upper end of the dose range (see above). Heavier stable weights, e.g. a full cup, are not taken as the dose.",
+          "stability_tolerance": "How much the weight may wobble and still count as stable when detecting the dose.",
+          "stability_seconds": "How long the weight has to stay stable to count as the dose.",
+          "dose_lookback_minutes": "Only weight plateaus this recent before the brew can become its dose; older ones are ignored.",
+          "stop_switch": "Optional. A switch that ends the shot when turned off, usually the smart plug of the espresso machine. During a brew the integration turns it off early enough that the cup ends on the target once the drips have settled, and learns the machine's delay and drip from every shot. Set the target with the entities 'Target ratio' (ratio × detected dose) or 'Target yield' (fixed grams, also used when no dose was detected). Leave empty to disable the auto-stop."
         }
       }
     },
     "error": {
       "dose_range": "Dose range minimum must be lower than the maximum."
+    }
+  },
+  "services": {
+    "delete_brew": {
+      "name": "Delete brew",
+      "description": "Removes a stored brew from the history; brew count and coffee total are reduced accordingly.",
+      "fields": {
+        "entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Optional with a single scale."
+        },
+        "device_id": {
+          "name": "Device",
+          "description": "Scale device (instead of the config entry)."
+        },
+        "brew_id": {
+          "name": "Brew ID",
+          "description": "ID of a stored brew (websocket difluid_scale/brews, brew completed event)."
+        }
+      }
+    },
+    "learn_stop_from_brew": {
+      "name": "Learn stop from brew",
+      "description": "Feeds a past brew into the auto-stop model: weight and weight-derived flow at the cut time from the stored profile, overshoot = stored yield - weight at cut. Same acceptance checks as a live sample. Returns the computed sample.",
+      "fields": {
+        "entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Optional with a single scale."
+        },
+        "device_id": {
+          "name": "Device",
+          "description": "Scale device (instead of the config entry)."
+        },
+        "brew_id": {
+          "name": "Brew ID",
+          "description": "ID of a stored brew (websocket difluid_scale/brews, brew completed event)."
+        },
+        "cut_offset": {
+          "name": "Cut time",
+          "description": "Seconds from the brew start at which the stop switch was turned off."
+        },
+        "target": {
+          "name": "Target yield",
+          "description": "Optional: target of that brew; only used for the deviation in the response."
+        }
+      }
     }
   }
 }

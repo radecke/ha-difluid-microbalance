@@ -16,9 +16,10 @@ from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass, UnitOfTi
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .autostop import AutoStop
 from .brews import BrewHistory
 from .coordinator import DifluidConfigEntry, DifluidData
-from .entity import DifluidBrewEntity, DifluidEntity
+from .entity import DifluidBrewEntity, DifluidEntity, DifluidStopEntity
 from .protocol import DeviceState, WeightUnit
 
 PARALLEL_UPDATES = 0
@@ -186,6 +187,56 @@ BREW_SENSORS: tuple[DifluidBrewSensorEntityDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class DifluidStopSensorEntityDescription(SensorEntityDescription):
+    """Adaptive stop sensor description reading from the stop model."""
+
+    value_fn: Callable[[AutoStop], float | int | None]
+
+
+def _last_deviation(stop: AutoStop) -> float | None:
+    return stop.last.get("deviation") if stop.last else None
+
+
+STOP_SENSORS: tuple[DifluidStopSensorEntityDescription, ...] = (
+    DifluidStopSensorEntityDescription(
+        key="stop_latency",
+        translation_key="stop_latency",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: round(s.model.tau, 3),
+    ),
+    DifluidStopSensorEntityDescription(
+        key="stop_drip",
+        translation_key="stop_drip",
+        device_class=SensorDeviceClass.WEIGHT,
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: round(s.model.c, 3),
+    ),
+    DifluidStopSensorEntityDescription(
+        key="stop_samples",
+        translation_key="stop_samples",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s: s.model.count,
+    ),
+    DifluidStopSensorEntityDescription(
+        key="stop_deviation",
+        translation_key="stop_deviation",
+        device_class=SensorDeviceClass.WEIGHT,
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_last_deviation,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DifluidConfigEntry,
@@ -197,6 +248,7 @@ async def async_setup_entry(
     async_add_entities(
         DifluidBrewSensor(coordinator, desc) for desc in BREW_SENSORS
     )
+    async_add_entities(DifluidStopSensor(coordinator, desc) for desc in STOP_SENSORS)
 
 
 class DifluidSensor(DifluidEntity, SensorEntity):
@@ -234,3 +286,24 @@ class DifluidBrewSensor(DifluidBrewEntity, SensorEntity):
         if brew is None:
             return None
         return {"last_brew_id": brew["id"], "last_brew_start": brew["start"]}
+
+
+class DifluidStopSensor(DifluidStopEntity, SensorEntity):
+    """Learned stop model and the result of the last cut brew."""
+
+    entity_description: DifluidStopSensorEntityDescription
+
+    @property
+    def native_value(self) -> float | int | None:
+        """Return the value from the stop model."""
+        return self.entity_description.value_fn(self.coordinator.autostop)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Deviation only: the last cut brew (cut, prediction, settled yield)."""
+        if self.entity_description.key != "stop_deviation":
+            return None
+        last = self.coordinator.autostop.last
+        if last is None:
+            return None
+        return {k: v for k, v in last.items() if k != "deviation"}

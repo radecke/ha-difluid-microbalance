@@ -241,6 +241,25 @@ class BrewHistory:
         self._async_changed()
 
     @callback
+    def async_delete(self, brew_id: str) -> dict[str, Any]:
+        """Remove a stored brew and take it out of the totals.
+
+        No brew-completed event; listeners, the dispatcher signal (card) and
+        the store are updated. Raises LookupError for an unknown id.
+        """
+        brew = self.get(brew_id)
+        if brew is None:
+            raise LookupError(brew_id)
+        self.brews.remove(brew)
+        self.brew_count = max(0, self.brew_count - 1)
+        counted = brew.get("counted_dose")
+        if counted is None:
+            counted = brew.get("dose") or 0.0
+        self.coffee_total = max(0.0, round(self.coffee_total - counted, 1))
+        self._async_changed()
+        return brew
+
+    @callback
     def async_set_last_dose(self, dose: float) -> None:
         """Correct the newest brew's dose (recomputes its ratio)."""
         brew = self.last

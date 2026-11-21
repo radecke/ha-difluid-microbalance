@@ -1,0 +1,50 @@
+delete_brew:
+  fields:
+    entry_id:
+      selector:
+        config_entry:
+          integration: difluid_scale
+    device_id:
+      selector:
+        device:
+          integration: difluid_scale
+    brew_id:
+      required: true
+      example: "01JD7Z3Q0V7H4M2N5P8R6S9T0W"
+      selector:
+        text:
+
+learn_stop_from_brew:
+  fields:
+    entry_id:
+      selector:
+        config_entry:
+          integration: difluid_scale
+    device_id:
+      selector:
+        device:
+          integration: difluid_scale
+    brew_id:
+      required: true
+      example: "01JD7Z3Q0V7H4M2N5P8R6S9T0W"
+      selector:
+        text:
+    cut_offset:
+      required: true
+      example: 27.83
+      selector:
+        number:
+          min: 0
+          max: 600
+          step: 0.01
+          unit_of_measurement: s
+          mode: box
+    target:
+      example: 38
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.1
+          unit_of_measurement: g
+          mode: box

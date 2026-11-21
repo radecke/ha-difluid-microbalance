@@ -7,13 +7,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
-from .entity import DifluidEntity
+from .entity import DifluidEntity, DifluidStopEntity
 from .protocol import (
     CMD_TARE,
     CMD_TIMER_START,
@@ -59,13 +60,7 @@ async def _timer_start(coordinator: DifluidCoordinator) -> None:
 
 
 async def _timer_stop(coordinator: DifluidCoordinator) -> None:
-    """DLink press, then ask for the state so the stop is seen at once
-    (the brew tracker otherwise notices it only by the timer stalling)."""
-    await coordinator.async_send(CMD_TIMER_STOP)
-    try:
-        await coordinator.async_request_status()
-    except HomeAssistantError:
-        pass  # the stop itself went out; the stall check still catches it
+    await coordinator.async_stop_timer()
 
 
 async def _timer_reset(coordinator: DifluidCoordinator) -> None:
@@ -104,6 +99,13 @@ BUTTONS: tuple[DifluidButtonEntityDescription, ...] = (
     ),
 )
 
+RESET_STOP_LEARNING = ButtonEntityDescription(
+    key="reset_stop_learning",
+    translation_key="reset_stop_learning",
+    icon="mdi:restore",
+    entity_category=EntityCategory.CONFIG,
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -113,6 +115,7 @@ async def async_setup_entry(
     """Set up buttons."""
     coordinator = entry.runtime_data
     async_add_entities(DifluidButton(coordinator, desc) for desc in BUTTONS)
+    async_add_entities([DifluidResetStopButton(coordinator, RESET_STOP_LEARNING)])
 
 
 class DifluidButton(DifluidEntity, ButtonEntity):
@@ -123,3 +126,11 @@ class DifluidButton(DifluidEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Run the action; raises HomeAssistantError when not connected."""
         await self.entity_description.press_fn(self.coordinator)
+
+
+class DifluidResetStopButton(DifluidStopEntity, ButtonEntity):
+    """Forgets the learned stop model (back to the prior)."""
+
+    async def async_press(self) -> None:
+        """Reset; works while the scale is off."""
+        self.coordinator.autostop.async_reset()

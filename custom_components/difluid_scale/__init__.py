@@ -5,12 +5,14 @@ from __future__ import annotations
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from .brews import BrewHistory, brew_config_from_options
-from .const import DOMAIN
+from .const import DOMAIN, STOP_STORAGE_KEY, STOP_STORAGE_VERSION
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
 from .frontend import async_register_card
+from .services import async_register_services
 from .websocket import async_register_websocket
 
 PLATFORMS: list[Platform] = [
@@ -27,8 +29,9 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the websocket API and the brew card once."""
+    """Register the websocket API, the services and the brew card once."""
     async_register_websocket(hass)
+    async_register_services(hass)
     await async_register_card(hass)
     return True
 
@@ -38,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: DifluidConfigEntry) -> b
     address: str = entry.data[CONF_ADDRESS]
     coordinator = DifluidCoordinator(hass, entry, address)
     await coordinator.brews.async_load()
+    await coordinator.autostop.async_load()
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -67,5 +71,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: DifluidConfigEntry) -> 
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: DifluidConfigEntry) -> None:
-    """Delete stored brews when the entry is removed."""
+    """Delete stored brews and the learned stop model when the entry is removed."""
     await BrewHistory(hass, entry.entry_id, lambda: None).async_remove()
+    await Store(
+        hass, STOP_STORAGE_VERSION, STOP_STORAGE_KEY.format(entry.entry_id)
+    ).async_remove()

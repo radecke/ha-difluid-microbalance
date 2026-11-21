@@ -37,6 +37,9 @@ CONF_DOSE_MAX: Final = "dose_max"
 CONF_STABILITY_TOLERANCE: Final = "stability_tolerance"
 CONF_STABILITY_SECONDS: Final = "stability_seconds"
 CONF_DOSE_LOOKBACK: Final = "dose_lookback_minutes"
+# Adaptive stop: switch turned off when the target yield is reached (none =
+# feature off). Not a brew threshold, so not in DEFAULT_OPTIONS.
+CONF_STOP_SWITCH: Final = "stop_switch"
 
 DEFAULT_OPTIONS: Final[dict[str, float]] = {
     CONF_TAIL_SECONDS: 3.0,
@@ -56,6 +59,9 @@ SIGNAL_LIVE: Final = f"{DOMAIN}_live_{{}}"  # .format(entry_id)
 STORAGE_VERSION: Final = 1
 STORAGE_KEY: Final = f"{DOMAIN}.brews.{{}}"  # .format(entry_id)
 MAX_STORED_BREWS: Final = 20
+# Learned stop model (tau, c, covariance) and the last cut brew.
+STOP_STORAGE_VERSION: Final = 1
+STOP_STORAGE_KEY: Final = f"{DOMAIN}.stop_learning.{{}}"  # .format(entry_id)
 
 # Brew tracker housekeeping while a brew is active (stall check, tail end,
 # parking backstop) and the live-data push cadence for the card.

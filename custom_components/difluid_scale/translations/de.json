@@ -71,6 +71,64 @@
       },
       "coffee_total": {
         "name": "Kaffee gemahlen gesamt"
+      },
+      "stop_latency": {
+        "name": "Stopp-Latenz"
+      },
+      "stop_drip": {
+        "name": "Stopp-Nachtropfen"
+      },
+      "stop_samples": {
+        "name": "Stopp-Lernproben"
+      },
+      "stop_deviation": {
+        "name": "Stopp-Abweichung",
+        "state_attributes": {
+          "target": {
+            "name": "Zielgewicht"
+          },
+          "cut_weight": {
+            "name": "Gewicht beim Abschalten"
+          },
+          "cut_flow": {
+            "name": "Durchfluss beim Abschalten"
+          },
+          "predicted_overshoot": {
+            "name": "Vorhergesagter Nachlauf"
+          },
+          "lead": {
+            "name": "Vorlauf (halbes Messintervall)"
+          },
+          "final_yield": {
+            "name": "Endgewicht"
+          },
+          "overshoot": {
+            "name": "Nachlauf"
+          },
+          "accepted": {
+            "name": "Gelernt"
+          },
+          "reason": {
+            "name": "Nicht gelernt, weil",
+            "state": {
+              "outlier": "Ausreißer",
+              "not_settled": "Gewicht nicht zur Ruhe gekommen",
+              "brew_discarded": "Bezug verworfen",
+              "brew_truncated": "Bezug abgebrochen",
+              "cup_lifted": "Tasse vor dem Nachtropfen abgenommen"
+            }
+          },
+          "target_source": {
+            "name": "Zielquelle",
+            "state": {
+              "ratio": "Verhältnis × Dosis",
+              "yield": "Festes Zielgewicht"
+            }
+          },
+          "dose": {
+            "name": "Dosis"
+          }
+        }
       }
     },
     "binary_sensor": {
@@ -90,6 +148,9 @@
       },
       "timer_reset": {
         "name": "Timer zurücksetzen"
+      },
+      "reset_stop_learning": {
+        "name": "Stopp-Lernen zurücksetzen"
       }
     },
     "event": {
@@ -135,6 +196,12 @@
     "number": {
       "dose_correction": {
         "name": "Dosis korrigieren"
+      },
+      "target_yield": {
+        "name": "Zielgewicht"
+      },
+      "target_ratio": {
+        "name": "Zielverhältnis"
       }
     }
   },
@@ -150,13 +217,22 @@
     },
     "no_brew": {
       "message": "Es wurde noch kein Bezug aufgezeichnet."
+    },
+    "no_scale": {
+      "message": "Keine geladene DiFluid-Waage passt; entry_id oder device_id angeben."
+    },
+    "unknown_brew": {
+      "message": "Kein gespeicherter Bezug mit der ID {brew_id}."
+    },
+    "cut_outside_profile": {
+      "message": "Das Profil des Bezugs hat keinen Punkt bei oder vor {cut_offset} s (oder der Bezug hat kein Gewicht)."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Bezugserkennung",
-        "description": "Ein Bezug ist die Zeit, in der der Timer der Waage läuft, plus ein kurzer Nachlauf. Als Dosis gilt das letzte stabile Gewicht im Dosisbereich vor dem Bezug.",
+        "description": "Ein Bezug ist die Zeit, in der der Timer der Waage läuft, plus ein kurzer Nachlauf für die Tropfen. Die Dosis erkennt die Integration automatisch, wenn die Bohnen vor dem Bezug gewogen werden. Alle Werte haben sinnvolle Voreinstellungen; ändere sie nur, wenn Bezüge fehlen, geteilt oder mit falscher Dosis gespeichert werden. Optional: ein Stopp-Schalter für den lernenden Auto-Stopp.",
         "data": {
           "tail_seconds": "Nachlauf nach Timer-Stopp",
           "min_duration": "Mindestdauer eines Bezugs",
@@ -165,18 +241,70 @@
           "dose_max": "Dosisbereich bis",
           "stability_tolerance": "Toleranz für stabile Dosis (±)",
           "stability_seconds": "Dosis mindestens stabil für",
-          "dose_lookback_minutes": "Dosis höchstens so lange vor dem Bezug"
+          "dose_lookback_minutes": "Dosis höchstens so lange vor dem Bezug",
+          "stop_switch": "Stopp-Schalter"
         },
         "data_description": {
-          "tail_seconds": "Nach dem Timer-Stopp wird weiter aufgezeichnet, damit Nachtropfen mitzählt.",
-          "min_duration": "Kürzere Timerläufe werden nicht als Bezug gespeichert.",
-          "min_yield": "Läufe mit weniger Gewicht werden nicht als Bezug gespeichert.",
-          "dose_lookback_minutes": "Ältere Gewichtsplateaus werden nicht als Dosis verwendet."
+          "tail_seconds": "Nach dem Stopp des Waagen-Timers wird so lange weiter aufgezeichnet, damit die Tropfen noch ins Endgewicht und in die Kurve zählen. Abheben der Tasse beendet den Nachlauf früher. Mit Auto-Stopp wird der Timer erst angehalten, wenn das Gewicht zur Ruhe gekommen ist; die Voreinstellung 3 s reicht dann.",
+          "min_duration": "Kürzere Timerläufe werden nicht als Bezug gespeichert, z. B. ein kurzes Spülen oder ein versehentlich gestarteter Timer.",
+          "min_yield": "Läufe mit weniger Gewicht in der Tasse werden nicht als Bezug gespeichert, z. B. wenn der Timer ohne Kaffee lief.",
+          "dose_min": "So wird die Dosis erkannt: Dosierbecher oder Siebträger auf die Waage, tarieren, Bohnen einfüllen. Das letzte stabile Gewicht in diesem Bereich vor dem Bezug gilt als Dosis. Stell den Bereich um deine übliche Dosis (Voreinstellung 12–25 g).",
+          "dose_max": "Obergrenze des Dosisbereichs (siehe oben). Schwerere stabile Gewichte, z. B. eine volle Tasse, gelten nicht als Dosis.",
+          "stability_tolerance": "Wie stark das Gewicht schwanken darf und trotzdem als stabil für die Dosis gilt.",
+          "stability_seconds": "Wie lange das Gewicht stabil bleiben muss, damit es als Dosis gilt.",
+          "dose_lookback_minutes": "Nur Gewichtsplateaus, die höchstens so lange vor dem Bezug lagen, können seine Dosis werden; ältere werden ignoriert.",
+          "stop_switch": "Optional. Ein Schalter, der den Bezug beim Ausschalten beendet, meist die Steckdose der Espressomaschine. Während eines Bezugs schaltet die Integration ihn so früh aus, dass die Tasse nach dem Nachtropfen beim Ziel landet, und lernt Verzögerung und Nachtropfen der Maschine aus jedem Bezug. Das Ziel stellst du über die Entitäten „Zielverhältnis“ (Verhältnis × erkannte Dosis) oder „Zielgewicht“ (feste Gramm, auch wenn keine Dosis erkannt wurde) ein. Leer lassen, um den Auto-Stopp abzuschalten."
         }
       }
     },
     "error": {
       "dose_range": "Der Dosisbereich muss unten kleiner sein als oben."
+    }
+  },
+  "services": {
+    "delete_brew": {
+      "name": "Bezug löschen",
+      "description": "Entfernt einen gespeicherten Bezug aus dem Verlauf; Bezugsanzahl und Kaffeemenge gesamt werden entsprechend verringert.",
+      "fields": {
+        "entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Bei nur einer Waage optional."
+        },
+        "device_id": {
+          "name": "Gerät",
+          "description": "Waagen-Gerät (statt des Konfigurationseintrags)."
+        },
+        "brew_id": {
+          "name": "Bezugs-ID",
+          "description": "ID eines gespeicherten Bezugs (Websocket difluid_scale/brews, Bezug-fertig-Ereignis)."
+        }
+      }
+    },
+    "learn_stop_from_brew": {
+      "name": "Stopp aus Bezug lernen",
+      "description": "Lernt das Auto-Stopp-Modell aus einem früheren Bezug: Gewicht und aus dem Gewicht abgeleiteter Durchfluss zum Abschaltzeitpunkt aus dem gespeicherten Profil, Nachlauf = gespeichertes Gewicht − Gewicht beim Abschalten. Gleiche Annahmeprüfung wie eine Live-Probe. Gibt die berechnete Probe zurück.",
+      "fields": {
+        "entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Bei nur einer Waage optional."
+        },
+        "device_id": {
+          "name": "Gerät",
+          "description": "Waagen-Gerät (statt des Konfigurationseintrags)."
+        },
+        "brew_id": {
+          "name": "Bezugs-ID",
+          "description": "ID eines gespeicherten Bezugs (Websocket difluid_scale/brews, Bezug-fertig-Ereignis)."
+        },
+        "cut_offset": {
+          "name": "Abschaltzeitpunkt",
+          "description": "Sekunden ab Bezugsbeginn, zu denen der Stopp-Schalter ausgeschaltet wurde."
+        },
+        "target": {
+          "name": "Zielgewicht",
+          "description": "Optional: Ziel dieses Bezugs; nur für die Abweichung in der Antwort."
+        }
+      }
     }
   }
 }

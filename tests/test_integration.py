@@ -12,12 +12,14 @@ import pytest
 pytest.importorskip("pytest_homeassistant_custom_component")
 
 from homeassistant.core import HomeAssistant  # noqa: E402
+from homeassistant.exceptions import ServiceValidationError  # noqa: E402
 from homeassistant.helpers.dispatcher import async_dispatcher_connect  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
 from homeassistant.util import dt as dt_util  # noqa: E402
 from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
     async_fire_time_changed,
+    async_mock_service,
 )
 
 from custom_components.difluid_scale import coordinator as coord_mod  # noqa: E402
@@ -26,7 +28,9 @@ from custom_components.difluid_scale.const import (  # noqa: E402
     DOMAIN,
     EVENT_BREW_COMPLETED,
     READY_TIMEOUT_SECONDS,
+    SIGNAL_BREWS_UPDATED,
     SIGNAL_LIVE,
+    STOP_STORAGE_KEY,
     STORAGE_KEY,
 )
 from custom_components.difluid_scale.frontend import (  # noqa: E402
@@ -43,7 +47,7 @@ from custom_components.difluid_scale.protocol import (  # noqa: E402
 )
 
 ADDR = "AA:BB:CC:DD:EE:FF"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 BREW_ENTITIES = (
     "sensor.microbalance_last_dose",
     "sensor.microbalance_last_yield",
@@ -115,6 +119,10 @@ class Scale:
         self.frozen: int | None = None
         self.client = FakeClient()
         self.next_tick = clock.t
+        self.shot_start = clock.t
+        self.calls: list = []
+        self.calls_at_cut = 0
+        self.written_at_cut: list[bytes] = []
         self.connect()
 
     def connect(self) -> None:
@@ -1063,3 +1071,430 @@ async def test_lovelace_yaml_mode_does_not_crash(
 async def test_no_lovelace_does_not_crash(hass: HomeAssistant, caplog) -> None:
     await _async_ensure_resource(hass, f"{CARD_URL}?v={VERSION}")
     assert "Lovelace not loaded" in caplog.text
+
+
+# ------------------------------------------------------------ auto-stop
+
+PLUG = "switch.espresso_plug"
+TARGET = "number.microbalance_target_yield"
+STOP_SENSORS = (
+    "sensor.microbalance_stop_latency",
+    "sensor.microbalance_stop_drip",
+    "sensor.microbalance_stop_learning_samples",
+    "sensor.microbalance_stop_deviation",
+)
+
+
+async def _setup_autostop(
+    hass: HomeAssistant, entry: MockConfigEntry, switch: str | None, target: float
+) -> list:
+    options = dict(OPTIONS)
+    if switch is not None:
+        options["stop_switch"] = switch
+    hass.config_entries.async_update_entry(entry, options=options)
+    await _setup(hass, entry)
+    calls = async_mock_service(hass, "switch", "turn_off")
+    await hass.services.async_call(
+        "number", "set_value", {"entity_id": TARGET, "value": target}, blocking=True
+    )
+    return calls
+
+
+async def _auto_shot(
+    hass: HomeAssistant,
+    scale: Scale,
+    *,
+    flow: float = 2.0,
+    latency: float = 1.2,
+    drip: float = 0.5,
+    seconds: float = 45.0,
+    start_weight: float = 0.0,
+    lift_after_cut: float | None = None,
+    dose: float | None = 18.0,
+) -> float | None:
+    """A shot whose pump stops ``latency`` s after the auto-stop cut, then
+    drips ``drip`` g. The scale answers the timer stop like the real one.
+    Returns the cut time (None if never cut)."""
+    coord = scale.coord
+    clock = scale.clock
+    if dose is not None:
+        scale.weigh_dose(dose)
+
+    def _on_status() -> None:
+        scale.frozen = scale.timer()
+        scale.status(DeviceState.TIMER_PAUSE)
+
+    scale.client.on_status = _on_status
+    scale.status(DeviceState.TIMING)
+    scale.timer_start = clock.t
+    w = start_weight
+    dripped = 0.0
+    cut_t: float | None = None
+    start = scale.shot_start = clock.t
+    while clock.t - start < seconds:
+        if cut_t is None and coord.autostop._cut is not None:  # noqa: SLF001
+            cut_t = clock.t
+            # Issued from the sample handler itself, before anything awaits.
+            scale.calls_at_cut = len(scale.calls)
+            scale.written_at_cut = list(scale.client.written)
+            await hass.async_block_till_done()
+        off = cut_t is not None and clock.t >= cut_t + latency
+        if clock.t - start > 3 and not off:
+            w += flow * 0.1
+        elif off:
+            step = (drip - dripped) * 0.3
+            dripped += step
+            w += step
+        if (
+            lift_after_cut is not None
+            and cut_t is not None
+            and clock.t >= cut_t + lift_after_cut
+        ):
+            w = -300.0
+        if scale.frozen is not None:
+            # Like the real scale (2026-11-21): no weight frames while the
+            # timer is paused, only time passes.
+            scale.clock.t = round(scale.clock.t + 0.1, 3)
+            scale._tick()  # noqa: SLF001
+            await hass.async_block_till_done()
+            continue
+        scale.run(0.1, round(w, 1))
+    await hass.async_block_till_done()
+    return cut_t
+
+
+async def test_autostop_cuts_once_learns_and_persists(
+    hass: HomeAssistant, hass_storage: dict[str, Any], entry, no_ble, lovelace, clock
+) -> None:
+    calls = await _setup_autostop(hass, entry, PLUG, 38.0)
+    coord = entry.runtime_data
+    assert _state(hass, TARGET) == "38.0"
+    assert _state(hass, "sensor.microbalance_stop_latency") == "1.0"
+    assert _state(hass, "sensor.microbalance_stop_drip") == "0.3"
+    assert _state(hass, "sensor.microbalance_stop_learning_samples") == "0"
+    assert _state(hass, "sensor.microbalance_stop_deviation") == "unknown"
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    cut_t = await _auto_shot(hass, scale)
+    assert cut_t is not None
+    assert scale.calls_at_cut == 1
+    # The timer keeps running past the cut (the paused scale sends no
+    # weight, the drips would be missed); it is stopped once settled.
+    assert CMD_TIMER_STOP not in scale.written_at_cut
+    assert len(calls) == 1 and calls[0].data == {"entity_id": PLUG}
+    assert scale.client.written.count(CMD_TIMER_STOP) == 1
+    # Prior: 1.0 s * ~2 g/s + 0.3 g -> cut at about 35.7 g.
+    last = coord.autostop.last
+    assert last is not None and last["accepted"], last
+    assert 35.3 <= last["cut_weight"] <= 36.1, last
+    assert 1.8 <= last["cut_flow"] <= 2.2, last
+    # Real overshoot: 1.2 s * 2 g/s + 0.5 g drip = 2.9 g.
+    assert 2.6 <= last["overshoot"] <= 3.1, last
+    assert last["deviation"] == round(last["final_yield"] - 38.0, 1)
+    assert coord.brews.brew_count == 1
+    brew = coord.brews.last
+    # The saved yield includes the drips (timer stopped only once settled).
+    assert abs(brew["yield"] - last["final_yield"]) <= 0.1, (brew, last)
+    assert brew["yield"] > last["cut_weight"] + 2.0, (brew, last)
+    # Duration runs past the cut until the weight settled (<= TIMER_STOP_MAX).
+    over = brew["duration"] - (cut_t - scale.shot_start)
+    assert 1.0 <= over <= 10.5, brew
+    assert coord.autostop.model.count == 1
+    assert _state(hass, "sensor.microbalance_stop_learning_samples") == "1"
+    # Prior phase: tau learned, c stays at its prior.
+    assert float(_state(hass, "sensor.microbalance_stop_latency")) != 1.0
+    assert _state(hass, "sensor.microbalance_stop_drip") == "0.3"
+    attrs = hass.states.get("sensor.microbalance_stop_deviation").attributes
+    assert attrs["accepted"] is True and attrs["cut_weight"] == last["cut_weight"]
+
+    # Learned state survives a reload (flushed on unload); target restored.
+    model = coord.autostop.model.to_dict()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    key = STOP_STORAGE_KEY.format(entry.entry_id)
+    assert hass_storage[key]["data"]["model"] == model
+    coord = entry.runtime_data
+    assert coord.autostop.model.to_dict() == model
+    assert coord.autostop.target == 38.0 and _state(hass, TARGET) == "38.0"
+    assert _state(hass, "sensor.microbalance_stop_learning_samples") == "1"
+
+    # Second shot learns again; the switch is turned off once more.
+    scale = Scale(coord, clock)
+    assert await _auto_shot(hass, scale) is not None
+    assert len(calls) == 2
+    assert coord.autostop.model.count == 2
+    # The learned offset brings the second shot closer to the target.
+    assert abs(coord.autostop.last["deviation"]) < abs(last["deviation"])
+
+    # Reset button: back to the prior (works with the scale connected or not).
+    await hass.services.async_call(
+        "button", "press",
+        {"entity_id": "button.microbalance_reset_stop_learning"}, blocking=True,
+    )
+    assert coord.autostop.model.count == 0
+    assert _state(hass, "sensor.microbalance_stop_learning_samples") == "0"
+    assert _state(hass, "sensor.microbalance_stop_latency") == "1.0"
+
+    # Removing the entry deletes the learned model.
+    assert await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert key not in hass_storage
+
+
+@pytest.mark.parametrize(("switch", "target"), [(None, 38.0), (PLUG, 0.0)])
+async def test_autostop_inactive_without_switch_or_target(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock, switch, target
+) -> None:
+    calls = await _setup_autostop(hass, entry, switch, target)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    assert await _auto_shot(hass, scale, seconds=30) is None
+    assert calls == []
+    assert CMD_TIMER_STOP not in scale.client.written
+    assert coord.autostop.last is None and coord.autostop.model.count == 0
+    for entity_id in STOP_SENSORS:
+        assert hass.states.get(entity_id) is not None, entity_id
+
+
+async def test_autostop_option_applies_live(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """Choosing the switch in the options flow arms it without a reload."""
+    calls = await _setup_autostop(hass, entry, None, 38.0)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**OPTIONS, "stop_switch": PLUG}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.options["stop_switch"] == PLUG
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    assert await _auto_shot(hass, scale) is not None
+    assert len(calls) == 1
+    # Cleared again: off.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], dict(OPTIONS)
+    )
+    await hass.async_block_till_done()
+    assert "stop_switch" not in entry.options
+    assert coord.autostop.switch_entity is None and not coord.autostop.enabled
+
+
+async def test_autostop_cup_lifted_is_not_learned(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    calls = await _setup_autostop(hass, entry, PLUG, 38.0)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    # Lifted 1.5 s after the cut, while it still flows: no settled yield
+    # near the cut, the settled weight is the empty scale.
+    assert await _auto_shot(hass, scale, lift_after_cut=1.5) is not None
+    assert len(calls) == 1
+    last = coord.autostop.last
+    assert last is not None and not last["accepted"], last
+    assert last["reason"] == "cup_lifted", last
+    # The brew is still saved, cut at the lift.
+    assert coord.brews.brew_count == 1
+    assert coord.brews.last["yield"] > 30, coord.brews.last
+    assert coord.autostop.model.count == 0
+
+
+async def test_autostop_untared_cup_never_cuts(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """Weight far above the target from the start (cup not tared): no cut."""
+    calls = await _setup_autostop(hass, entry, PLUG, 38.0)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    assert await _auto_shot(hass, scale, start_weight=250.0, seconds=30) is None
+    assert calls == []
+
+
+# ------------------------------------------------------------- services
+
+# Real brew 2026-11-21 (plug off at +27.83 s), profile around the cut.
+REAL_BREW = {
+    "id": "01REAL",
+    "start": "2026-11-21T06:43:47.825000+00:00",
+    "duration": 28.0,
+    "dose": 18.0,
+    "dose_source": "auto",
+    "yield": 38.6,
+    "ratio": 2.14,
+    "counted_dose": 18.0,
+    "profile": [
+        [25.0, 28.0, 3.0],
+        [26.83, 33.7, 3.0],
+        [27.14, 34.8, 3.1],
+        [27.44, 34.4, 3.0],
+        [27.75, 36.8, 3.2],
+        [28.04, 37.4, 3.0],
+        [31.0, 38.6, 0.0],
+    ],
+}
+OTHER_BREW = {
+    "id": "01OTHER",
+    "start": "2026-11-21T07:10:00+00:00",
+    "duration": 27.0,
+    "dose": 17.5,
+    "dose_source": "manual",
+    "yield": 36.0,
+    "ratio": 2.06,
+    "counted_dose": 18.0,
+    "profile": [[0.0, 0.0, 0.0], [27.0, 36.0, 0.0]],
+}
+
+
+def _store_brews(hass_storage: dict[str, Any], entry: MockConfigEntry) -> str:
+    key = STORAGE_KEY.format(entry.entry_id)
+    hass_storage[key] = {
+        "version": 1,
+        "minor_version": 1,
+        "key": key,
+        "data": {
+            "brews": [dict(REAL_BREW), dict(OTHER_BREW)],
+            "brew_count": 5,
+            "coffee_total": 90.0,
+        },
+    }
+    return key
+
+
+async def test_delete_brew_service(
+    hass: HomeAssistant, hass_storage: dict[str, Any], entry, no_ble, lovelace, clock
+) -> None:
+    key = _store_brews(hass_storage, entry)
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    events: list = []
+    hass.bus.async_listen(EVENT_BREW_COMPLETED, events.append)
+    signals: list = []
+    async_dispatcher_connect(
+        hass, SIGNAL_BREWS_UPDATED.format(entry.entry_id), lambda: signals.append(1)
+    )
+    assert _state(hass, "sensor.microbalance_last_yield") == "36.0"
+
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN, "delete_brew", {"brew_id": "01NOPE"}, blocking=True
+        )
+    # Deleting the newest: counted_dose (18.0, not the corrected 17.5) leaves
+    # the total; sensors follow the new newest brew.
+    await hass.services.async_call(
+        DOMAIN, "delete_brew",
+        {"brew_id": "01OTHER", "entry_id": entry.entry_id}, blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert [b["id"] for b in coord.brews.brews] == ["01REAL"]
+    assert coord.brews.brew_count == 4 and coord.brews.coffee_total == 72.0
+    assert _state(hass, "sensor.microbalance_brew_count") == "4"
+    assert _state(hass, "sensor.microbalance_coffee_ground_total") == "72.0"
+    assert _state(hass, "sensor.microbalance_last_yield") == "38.6"
+    assert signals and events == []
+    # Persisted (flushed on unload).
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    data = hass_storage[key]["data"]
+    assert [b["id"] for b in data["brews"]] == ["01REAL"]
+    assert data["brew_count"] == 4 and data["coffee_total"] == 72.0
+
+
+async def test_learn_stop_from_brew_service(
+    hass: HomeAssistant, hass_storage: dict[str, Any], entry, no_ble, lovelace, clock
+) -> None:
+    _store_brews(hass_storage, entry)
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    response = await hass.services.async_call(
+        DOMAIN, "learn_stop_from_brew",
+        {"brew_id": "01REAL", "cut_offset": 27.83, "target": 38.0},
+        blocking=True, return_response=True,
+    )
+    flow = (36.8 - 33.7) / (27.75 - 26.83)  # same 1 s secant as the live cut
+    assert response["cut_point_t"] == 27.75
+    assert response["weight_at_cut"] == 36.8
+    assert abs(response["flow_at_cut"] - round(flow, 3)) < 1e-9
+    assert response["final_yield"] == 38.6 and response["overshoot"] == 1.8
+    assert response["deviation"] == 0.6 and response["accepted"] is True
+    assert response["predicted_overshoot_before"] == round(0.3 + 1.0 * flow, 2)
+    assert response["model"]["count"] == 1
+    # Prior phase: only tau moved, towards (1.8 - 0.3) / flow.
+    assert coord.autostop.model.c == 0.3
+    assert coord.autostop.model.tau < 1.0
+    assert _state(hass, "sensor.microbalance_stop_learning_samples") == "1"
+
+    # Outlier (cut far before the end: overshoot > 5 g): not learned.
+    response = await hass.services.async_call(
+        DOMAIN, "learn_stop_from_brew",
+        {"brew_id": "01REAL", "cut_offset": 25.5},
+        blocking=True, return_response=True,
+    )
+    assert response["accepted"] is False and response["reason"] == "outlier"
+    assert response["overshoot"] == 10.6 and response["deviation"] is None
+    assert coord.autostop.model.count == 1
+
+    for data in (
+        {"brew_id": "01NOPE", "cut_offset": 27.0},
+        {"brew_id": "01REAL", "cut_offset": 1.0},  # before the first point
+    ):
+        with pytest.raises(ServiceValidationError):
+            await hass.services.async_call(
+                DOMAIN, "learn_stop_from_brew", data,
+                blocking=True, return_response=True,
+            )
+
+    # Persisted.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    key = STOP_STORAGE_KEY.format(entry.entry_id)
+    assert hass_storage[key]["data"]["model"]["count"] == 1
+
+
+RATIO = "number.microbalance_target_ratio"
+
+
+async def test_autostop_target_ratio_uses_dose_else_fixed_yield(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """Ratio x detected dose is the target; without a dose the fixed target
+    yield is the fallback."""
+    calls = await _setup_autostop(hass, entry, PLUG, 30.0)
+    coord = entry.runtime_data
+    await hass.services.async_call(
+        "number", "set_value", {"entity_id": RATIO, "value": 2.0}, blocking=True
+    )
+    assert _state(hass, RATIO) == "2.0"
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    assert await _auto_shot(hass, scale, dose=18.0) is not None
+    last = coord.autostop.last
+    assert last is not None, last
+    assert last["target"] == 36.0 and last["target_source"] == "ratio", last
+    assert last["dose"] == 18.0, last
+    assert 33.0 <= last["cut_weight"] <= 36.0, last
+
+    # Second shot: no dose weighed -> fixed target yield (30 g).
+    clock.t += 120
+    scale2 = Scale(coord, clock)
+    scale2.calls = calls
+    assert await _auto_shot(hass, scale2, dose=None) is not None
+    last = coord.autostop.last
+    assert last["target"] == 30.0 and last["target_source"] == "yield", last
+    assert last["dose"] is None, last
+    assert len(calls) == 2
+
+
+async def test_autostop_ratio_without_dose_and_no_yield_does_not_cut(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    calls = await _setup_autostop(hass, entry, PLUG, 0.0)
+    coord = entry.runtime_data
+    await hass.services.async_call(
+        "number", "set_value", {"entity_id": RATIO, "value": 2.5}, blocking=True
+    )
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    assert await _auto_shot(hass, scale, dose=None, seconds=30) is None
+    assert calls == []

@@ -127,7 +127,7 @@ def test_normal_shot_with_dose() -> None:
     report("normal shot with dose", sim)
     assert len(sim.results) == 1, sim.results
     r = sim.results[0]
-    assert r.dose == 18.0, r.dose
+    assert r.dose == 18.0 and not r.truncated, r
     assert 36.0 <= r.yield_g <= 36.8, r.yield_g  # drips inside the tail count
     assert 29.0 <= r.duration <= 31.0, r.duration
     assert r.ratio == round(r.yield_g / 18.0, 2)
@@ -326,6 +326,7 @@ def test_disconnect_never_returns_closes_after_grace() -> None:
     assert len(sim.results) == 1 and not sim.tracker.active
     r = sim.results[0]
     assert r.dose == 18.0 and r.yield_g == 27.9 and 19.5 <= r.duration <= 20.1, r
+    assert r.truncated  # the auto-stop learns nothing from such a brew
 
 
 def test_disconnect_timer_reset_in_gap_closes_truncated() -> None:

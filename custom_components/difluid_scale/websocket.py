@@ -31,7 +31,7 @@ def async_register_websocket(hass: HomeAssistant) -> None:
 
 
 @callback
-def _resolve_entry(
+def resolve_entry(
     hass: HomeAssistant, msg: dict[str, Any]
 ) -> DifluidConfigEntry | None:
     """Find the loaded entry for an entry_id / device_id (or the only one)."""
@@ -53,7 +53,7 @@ def _resolve_entry(
 @callback
 def _resolve(hass: HomeAssistant, msg: dict[str, Any]) -> BrewHistory | None:
     """Find the brew history for an entry_id / device_id (or the only one)."""
-    entry = _resolve_entry(hass, msg)
+    entry = resolve_entry(hass, msg)
     return entry.runtime_data.brews if entry else None
 
 
@@ -121,7 +121,7 @@ def ws_subscribe(
 
     Unlike subscribe_events this also works for non-admin users.
     """
-    if (entry := _resolve_entry(hass, msg)) is None:
+    if (entry := resolve_entry(hass, msg)) is None:
         _not_found(connection, msg["id"])
         return
     msg_id = msg["id"]
@@ -164,7 +164,7 @@ def ws_subscribe_live(
     active, otherwise ``live_idle``; then ``live_ready``. Survives a reload of the entry (the
     signal is per entry id).
     """
-    if (entry := _resolve_entry(hass, msg)) is None:
+    if (entry := resolve_entry(hass, msg)) is None:
         _not_found(connection, msg["id"])
         return
     msg_id = msg["id"]

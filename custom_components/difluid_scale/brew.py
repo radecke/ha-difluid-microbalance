@@ -97,6 +97,8 @@ class BrewResult:
     # True when this is a reopened brew that was already accepted before
     # (pause/resume): the stored brew with the same start is replaced.
     updated: bool = False
+    # Closed by the park backstop (BLE gone): no tail, yield may be short.
+    truncated: bool = False
 
     @property
     def ratio(self) -> float | None:
@@ -765,6 +767,7 @@ class BrewTracker:
                     yield_g=yield_g,
                     profile=build_profile(points),
                     updated=self._reopened,
+                    truncated=truncated,
                 )
                 self.plateau.consume(plateau)
         stop_timer = self._stop_timer

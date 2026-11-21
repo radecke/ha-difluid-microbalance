@@ -13,6 +13,7 @@ It also records every brew automatically: dose, yield, ratio, brew time and the 
 and running totals (brew count, coffee ground). Each brew fires an event for your own automations.
 A bundled dashboard card draws the flow curve live while you brew and lets you browse and replay the last 20 brews.
 A "Prepare brew" switch puts the card into a ready view before the brew, with empty axes and the weighed dose.
+An adaptive auto-stop switches the espresso machine (any switch, e.g. its smart plug) off early enough that the cup ends on a target brew ratio (ratio × the weighed dose) or a target yield, and learns its timing from every shot.
 
 Tested with model `DFT-S101`, firmware `V320` and `V326`.
 
@@ -35,6 +36,8 @@ Tested with model `DFT-S101`, firmware `V320` and `V326`.
 | Weight unit | Select: gram / ounce / gering (third unit as named in the DiFluid protocol; no gram conversion documented, weight shows no value in this mode) |
 
 Brew entities (last dose, yield, ratio, brew duration, brew count, coffee ground total, dose correction, prepare brew): see [Brew detection and brew card](#brew-detection-and-brew-card-030) below.
+
+Auto-stop entities (target ratio, target yield, learned latency and drip, learning samples, deviation, reset) and the services `delete_brew` and `learn_stop_from_brew`: see [Auto-stop at target ratio or yield](#auto-stop-at-target-ratio-or-yield-040) below.
 
 ## Brew detection and brew card (0.3.0)
 
@@ -138,7 +141,42 @@ Points are `[seconds since start, weight g, flow g/s]`. Current values: `weight`
 
 ### Tests
 
-`python3 tests/test_brew.py` runs the brew detection tests without Home Assistant. The full suite needs `pytest-homeassistant-custom-component`: `pytest` from the repository root. `node tests/card_retry_test.mjs` tests the card's reconnect handling, `node tests/card_flow_test.mjs` the flow smoothing and the ready view (both also run by `pytest` when node is installed).
+`python3 tests/test_brew.py` runs the brew detection tests and `python3 tests/test_stop_model.py` the auto-stop model tests without Home Assistant. The full suite needs `pytest-homeassistant-custom-component`: `pytest` from the repository root. `node tests/card_retry_test.mjs` tests the card's reconnect handling, `node tests/card_flow_test.mjs` the flow smoothing and the ready view (both also run by `pytest` when node is installed).
+
+## Auto-stop at target ratio or yield (0.4.0)
+
+Set a **target ratio** (e.g. 2.5, yield ÷ dose) and/or a **target yield**, and choose a **stop switch** (Configure → *Stop switch*, e.g. the smart plug of the espresso machine; turning it off must end the shot at once). While a brew runs, the integration turns that switch off early enough that the weight in the cup **after the dripping has settled** lands on the target, and learns from every shot. Without a stop switch, or with the target at 0, the feature is off.
+
+| Entity | Description |
+|---|---|
+| Target ratio | Number, 0–5 (0 = off). With a dose detected for the running brew the target is ratio × dose; without one the target yield applies. Restored after a restart. |
+| Target yield | Number, 0–100 g (0 = off). The target when no ratio is set, and the fallback for brews without a detected dose. Restored after a restart. |
+| Stop latency | Learned `tau` in seconds (diagnostic) |
+| Stop drip | Learned `c` in grams (diagnostic) |
+| Stop learning samples | Number of shots the model has learned from (diagnostic) |
+| Stop deviation | Settled yield − target of the last auto-stopped shot. Attributes: `target`, `target_source` (`ratio` or `yield`), `dose`, `cut_weight`, `cut_flow`, `predicted_overshoot`, `lead`, `final_yield`, `overshoot`, `accepted`, `reason` (`outlier`, `not_settled`, `cup_lifted`, `brew_discarded`, `brew_truncated`) |
+| Reset stop learning | Button: back to the starting values |
+
+**How it works.** After the switch goes off the weight still rises: the command needs time (scale → Bluetooth → Home Assistant → plug → pump), and the puck drips. The overshoot is modelled as `c + tau × flow at the cut`. The flow is derived from the weight (slope over the last second, the same definition as the brew profile), not the scale's own flow value, which lags by 1–1.5 s. On every weight sample of a running brew (the scale's timer is counting) the integration checks
+
+`weight + c + tau × flow + flow × dt/2 ≥ target`
+
+and then turns the switch off (once per brew; the sample handler does not wait for it) but keeps the scale's timer running: while its timer is paused the scale sends no weight, so the drips would be missed. The timer is stopped once the weight has settled (at most 10 s after the cut, or at once if the cup is lifted), and the capture tail (`tail_seconds`) follows as usual, so the saved yield includes the drips. `dt/2` anticipates the sampling: the scale sends a weight only every ~0.3 s, so cutting at the first sample past the threshold would land up to one sample interval of flow late (0–1 g). `dt` is the median of the recent sample intervals in the running brew (0.3 s until known, limited to 0.1–1 s); this term is fixed, not learned. In a simulation with ~0.3 s samples and dropped frames it cut the mean absolute error from 0.48 g to 0.29 g (bias +0.48 → +0.15 g).
+
+The integration then waits until the weight has settled (changes by at most 0.2 g within 2 s, at most 30 s after the cut). If the brew was saved normally, the shot is one learning sample: `x` = flow at the cut, `y` = settled weight − weight at the cut. `tau` and `c` are fitted by recursive least squares with a forgetting factor of 0.93 (roughly the last 14 shots count), starting from `tau` = 1.0 s and `c` = 0.3 g. The first three samples only adjust `tau` (`c` stays at 0.3 g, since the first shots rarely differ enough in flow to separate the two); both are fitted from the fourth on. `tau` stays within 0–3 s, `c` within −0.5–3 g. Shots with an overshoot outside 0–5 g (cup bumped or lifted), discarded or truncated brews, and shots stopped any other way are not learned. A weight more than 5 g above the target, or one that is already past the threshold when the brew starts, never triggers a cut (a cup that was not tared).
+
+Notes: the learned model is stored per scale and removed with the integration. Because the timer keeps running until the weight has settled, the saved brew's yield includes the drips and the brew time includes the dripping. "Prepare brew" is not needed for the auto-stop.
+
+### Services
+
+Both accept an optional `entry_id` or `device_id`; with a single scale both can be omitted.
+
+| Service | Fields | Effect |
+|---|---|---|
+| `difluid_scale.delete_brew` | `brew_id` | Removes a saved brew. Brew count goes down by 1 and coffee ground total by the dose that brew had added; sensors and the card update. No brew-completed event. |
+| `difluid_scale.learn_stop_from_brew` | `brew_id`, `cut_offset` (s since the brew start), `target` (optional) | Teaches the auto-stop from a past brew, e.g. one stopped by an earlier automation. The profile point at or just before `cut_offset` is the cut: its weight, and the flow computed the same way as live. Learning sample: saved yield − that weight, with the same acceptance checks as a live shot. Returns the sample (`weight_at_cut`, `flow_at_cut`, `overshoot`, `accepted`, the model after the update, and `deviation` if `target` is given). |
+
+Note that `brew_count` and `coffee_total` are *total increasing* sensors: Home Assistant's long-term statistics read a decrease as a meter reset.
 
 ## Installation
 
@@ -170,6 +208,7 @@ Turn the scale on. Home Assistant discovers it automatically; confirm the discov
 - The scale accepts **one** BLE connection. While Home Assistant is connected, the DiFluid app cannot connect. Disable the integration temporarily to use the app.
 - Powering the scale off via Bluetooth does not work. The documented command is acknowledged, but the scale stays on.
 - The scale does not accept settings while the timer is running.
+- The scale sends no weight while its timer is paused; weight updates resume when the timer runs again or is reset.
 - Only the cleartext channel is used. The encrypted channel requires DiFluid's server-side activation and is not supported.
 
 ## Protocol

@@ -27,6 +27,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .autostop import AutoStop
 from .brew import BrewResult, BrewTracker
 from .brews import BrewHistory, brew_config_from_options, brew_summary
 from .const import (
@@ -52,6 +53,7 @@ from .protocol import (
     CMD_SETTINGS_AUTO_DETECT_TIMING,
     CMD_SETTINGS_AUTO_STOP_TIMING,
     CMD_SETTINGS_WEIGHT_UNIT,
+    CMD_TIMER_STOP,
     FUNC_INFO,
     DeviceState,
     Frame,
@@ -161,6 +163,8 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._ready_dose: float | None = None
         self._cancel_ready_timeout: CALLBACK_TYPE | None = None
         self._ready_listeners: list[ReadyListener] = []
+        # Adaptive stop at the target yield.
+        self.autostop = AutoStop(hass, self, entry.entry_id)
 
     @property
     def connected(self) -> bool:
@@ -248,6 +252,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             except BleakError as err:
                 _LOGGER.debug("%s: error during disconnect: %s", self.address, err)
         await self.brews.async_flush()
+        await self.autostop.async_flush()
         await super().async_shutdown()
 
     # -------------------------------------------------------------- connection
@@ -519,11 +524,15 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                     changed = True
                 sensor = new_sensor
                 if (grams := new_sensor.weight_grams) is not None:
+                    now = time.time()
                     self._handle_brew_result(
                         self.brew_tracker.feed_sample(
-                            time.time(), grams, new_sensor.flow_rate, new_sensor.timer
+                            now, grams, new_sensor.flow_rate, new_sensor.timer
                         )
                     )
+                    # After the tracker (brew state is current), before the
+                    # rest of the frame: the cut goes out without delay.
+                    self.autostop.feed_sample(now, grams)
                     self._refresh_ready_dose()
                 if settings.get(CMD_SETTINGS_WEIGHT_UNIT) != new_sensor.unit:
                     settings = {**settings, CMD_SETTINGS_WEIGHT_UNIT: new_sensor.unit}
@@ -593,6 +602,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         if self._unloading:
             return
         tracker = self.brew_tracker
+        self.autostop.brew_finished(result, tracker.last_discard_reason is not None)
         if result is not None:
             brew = self.brews.async_add_result(result)
             self._end_live(end_message(brew=brew_summary(brew)))
@@ -767,6 +777,15 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
     async def async_set_setting(self, cmd: int, value: int) -> None:
         """Write a Func 1 setting; the echo updates ``data.settings``."""
         await self.async_send(build_set_setting(cmd, value))
+
+    async def async_stop_timer(self) -> None:
+        """DLink press, then ask for the state so the stop is seen at once
+        (the brew tracker otherwise notices it only by the timer stalling)."""
+        await self.async_send(CMD_TIMER_STOP)
+        try:
+            await self.async_request_status()
+        except HomeAssistantError:
+            pass  # the stop itself went out; the stall check still catches it
 
     async def async_request_status(self, timeout: float = 2.0) -> int | None:
         """Ask for a fresh status frame and return the device state."""

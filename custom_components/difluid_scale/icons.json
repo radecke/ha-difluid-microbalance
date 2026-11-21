@@ -1,0 +1,10 @@
+{
+  "services": {
+    "delete_brew": {
+      "service": "mdi:delete"
+    },
+    "learn_stop_from_brew": {
+      "service": "mdi:school"
+    }
+  }
+}

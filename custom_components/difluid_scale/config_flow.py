@@ -19,6 +19,8 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS, UnitOfMass, UnitOfTime
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -32,6 +34,7 @@ from .const import (
     CONF_MIN_YIELD,
     CONF_STABILITY_SECONDS,
     CONF_STABILITY_TOLERANCE,
+    CONF_STOP_SWITCH,
     CONF_TAIL_SECONDS,
     DEFAULT_OPTIONS,
     DOMAIN,
@@ -66,6 +69,10 @@ OPTIONS_SCHEMA = vol.Schema(
         vol.Required(CONF_STABILITY_TOLERANCE): _number(0.1, 5, 0.1, _GRAMS),
         vol.Required(CONF_STABILITY_SECONDS): _number(1, 30, 0.5, _SECONDS),
         vol.Required(CONF_DOSE_LOOKBACK): _number(1, 240, 1, UnitOfTime.MINUTES),
+        # Adaptive stop: turned off at the target yield; empty = feature off.
+        vol.Optional(CONF_STOP_SWITCH): EntitySelector(
+            EntitySelectorConfig(domain="switch")
+        ),
     }
 )
 
@@ -159,7 +166,7 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class DifluidOptionsFlow(OptionsFlow):
-    """Brew detection thresholds."""
+    """Brew detection thresholds and the auto-stop switch."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

@@ -161,7 +161,7 @@ def ws_subscribe_live(
     """Push live data of the active brew (see live.py for the messages).
 
     The first event is ``live_start`` with all points so far when a brew is
-    active, otherwise ``live_idle``. Survives a reload of the entry (the
+    active, otherwise ``live_idle``; then ``live_ready``. Survives a reload of the entry (the
     signal is per entry id).
     """
     if (entry := _resolve_entry(hass, msg)) is None:
@@ -179,4 +179,6 @@ def ws_subscribe_live(
         hass, SIGNAL_LIVE.format(entry.entry_id), _forward
     )
     connection.send_result(msg_id)
-    _forward(entry.runtime_data.live_snapshot())
+    coordinator = entry.runtime_data
+    _forward(coordinator.live_snapshot())
+    _forward(coordinator.ready_snapshot())

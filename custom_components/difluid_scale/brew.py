@@ -299,6 +299,13 @@ class BrewTracker:
         plateau = self._dose_plateau if self.active else None
         return plateau.weight if plateau else None
 
+    def next_dose(self, t: float) -> float | None:
+        """Dose a brew starting at ``t`` would get (the active brew's when one runs)."""
+        if self.active:
+            return self.dose_candidate
+        plateau = self.plateau.peek(t)
+        return plateau.weight if plateau else None
+
     @property
     def stop_elapsed(self) -> float | None:
         """Seconds from start to timer stop once known (tail), else None."""

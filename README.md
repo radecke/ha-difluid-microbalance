@@ -12,6 +12,7 @@ It shows weight, flow rate, brew timer and battery live, and lets you tare and c
 It also records every brew automatically: dose, yield, ratio, brew time and the full flow profile, with sensors for the latest brew
 and running totals (brew count, coffee ground). Each brew fires an event for your own automations.
 A bundled dashboard card draws the flow curve live while you brew and lets you browse and replay the last 20 brews.
+A "Prepare brew" switch puts the card into a ready view before the brew, with empty axes and the weighed dose.
 
 Tested with model `DFT-S101`, firmware `V320` and `V326`.
 
@@ -33,7 +34,7 @@ Tested with model `DFT-S101`, firmware `V320` and `V326`.
 | Auto timer start / Auto timer stop | Switches for the scale's "auto detect / auto stop timing" settings |
 | Weight unit | Select: gram / ounce / gering (third unit as named in the DiFluid protocol; no gram conversion documented, weight shows no value in this mode) |
 
-Brew entities (last dose, yield, ratio, brew duration, brew count, coffee ground total, dose correction): see [Brew detection and brew card](#brew-detection-and-brew-card-030) below.
+Brew entities (last dose, yield, ratio, brew duration, brew count, coffee ground total, dose correction, prepare brew): see [Brew detection and brew card](#brew-detection-and-brew-card-030) below.
 
 ## Brew detection and brew card (0.3.0)
 
@@ -55,6 +56,7 @@ The integration records each brew automatically. Brew detection follows the **sc
 | Brew count | Total number of brews (total increasing) |
 | Coffee ground total | Sum of all known doses in grams (total increasing) |
 | Dose correction | Number: sets the dose of the latest brew manually; the ratio is recomputed. Correcting a dose down and up again does not add to the coffee total twice. |
+| Prepare brew | Switch: a brew is about to start; the brew card shows an empty live chart (see [Ready mode](#ready-mode-031)). Available while the scale is off. Turns itself off when the brew ends (saved or discarded) or after 10 minutes without a brew starting. Starts off after a restart. |
 
 These entities keep their values while the scale is off. The last 20 brews, including their flow profiles, are stored in Home Assistant.
 Each brew fires the event `difluid_scale_brew_completed` with `dose`, `yield`, `ratio`, `duration`, `brew_id`, `start` and `updated` (true when a resumed brew replaced its earlier version).
@@ -75,13 +77,34 @@ type: custom:difluid-brew-card
 device_id: <your scale's device id>   # optional with a single scale
 title: Espresso                       # optional
 chart_height: fill                    # optional: pixels (100–2000) or fill
+flow_smoothing: 3                     # optional: seconds (0–10), 0 = raw scale flow
 ```
 
 **Chart height:** without `chart_height` the chart is 200 px high. A number sets the height in pixels. `fill` makes the card fill the rest of the screen: the chart grows until the card ends at the bottom of the visible window (never below 200 px), follows window resizes and rotation, and the live figures (time, flow, weight) get larger. Meant for a dashboard section that is shown only during a brew, e.g. on a tablet next to the machine. With a custom height the card lets its row in a sections view grow with it (`rows: auto`). Other values are rejected with an error in the card editor.
 
 **Live mode:** as soon as a brew starts, the card switches to it (also when you are looking at an older brew), shows elapsed time, flow rate and weight in large figures and draws the flow curve and the dashed weight curve as they come in. The axes start at an espresso range (30 s, 3 g/s, 40 g) and only grow. If the scale disconnects mid-brew, the card says so and continues when the scale is back. If the connection to Home Assistant fails, the card retries on its own. When the brew ends, the card shows the saved brew with dose, yield and ratio; a run that is not saved (too short, too little yield) is noted briefly and the card returns to the latest brew.
 
+**Flow smoothing (0.3.1):** the scale's own flow value lags the weight by 1–1.5 s (it is a trailing regression over about 3 s), and the weight jumps back by up to a few grams after upward jumps during a brew. With `flow_smoothing` (seconds, default `3`) the card computes the flow curve from the weight instead: the weight may only rise (a drop is ignored, the last maximum is held), and the flow at each point is the slope of that weight over the preceding `flow_smoothing` seconds. Before the weight first rises by more than 1 g the flow is 0. Only earlier readings are used, so in live mode a point once drawn never changes. The dashed weight curve, the hover readout and the live flow and weight figures use these values; the axes grow with them. `0` shows the scale's raw flow and weight as before. The stored profiles and the `Flow rate` sensor are not changed. Values outside 0–10 are rejected with an error in the card editor.
+
 **Replay:** the play button next to the brew navigation plays a stored brew back in real time, exactly like a live brew (curves building up, growing axes, time, flow and weight). The stop button ends it early; a brew that starts in the meantime takes over the card.
+
+#### Ready mode (0.3.1)
+
+Turn on **Prepare brew** (`switch.microbalance_prepare_brew` for a scale named "Microbalance") just before a brew, by hand or from an automation. While it is on and no brew runs, the card shows the live view with empty axes (30 s, 3 g/s, 40 g), time, flow and weight at 0, the dose the next brew would get (the weighed dose as in brew detection, or "–") and "Ready – brew starts soon". When the brew starts, the curves grow into that view; when it ends, the switch turns off and the card shows the saved brew. Turned off without a brew, the card returns to the brew history. `chart_height: fill` applies as in live mode.
+
+To show a fullscreen brew section only around a brew, make it visible while the timer runs **or** the switch is on (section → Visibility, or in YAML):
+
+```yaml
+visibility:
+  - condition: or
+    conditions:
+      - condition: numeric_state
+        entity: sensor.microbalance_timer
+        above: 0
+      - condition: state
+        entity: switch.microbalance_prepare_brew
+        state: "on"
+```
 
 If your dashboard resources are managed in YAML, add the resource yourself:
 
@@ -109,12 +132,13 @@ For your own frontends (all commands accept an optional `entry_id` or `device_id
 - `live_points`: only the new `points` since the last event, sent at most every 0.25 s, plus the current values.
 - `live_end`: `brew_id` and `brew` (summary) if saved, otherwise `reason` (`too_short`, `low_yield`, `no_samples`, `unloaded`) and `detail`.
 - `live_idle`: sent once on subscribe when no brew is running.
+- `live_ready`: `ready` (true/false), the state of the Prepare brew switch, and `dose` (the dose the next brew would get, or null; sent again when it changes). Sent on subscribe right after `live_start` / `live_idle`, and whenever the switch changes; when a brew ends, `ready: false` comes just before `live_end`.
 
 Points are `[seconds since start, weight g, flow g/s]`. Current values: `weight`, `flow`, `timer`, `elapsed` (seconds; stops at the timer stop), `phase` (`brewing`, `tail`, `parked` = waiting for a reconnect) and `stop` (seconds at the timer stop, or null).
 
 ### Tests
 
-`python3 tests/test_brew.py` runs the brew detection tests without Home Assistant. The full suite needs `pytest-homeassistant-custom-component`: `pytest` from the repository root. `node tests/card_retry_test.mjs` tests the card's reconnect handling (also run by `pytest` when node is installed).
+`python3 tests/test_brew.py` runs the brew detection tests without Home Assistant. The full suite needs `pytest-homeassistant-custom-component`: `pytest` from the repository root. `node tests/card_retry_test.mjs` tests the card's reconnect handling, `node tests/card_flow_test.mjs` the flow smoothing and the ready view (both also run by `pytest` when node is installed).
 
 ## Installation
 

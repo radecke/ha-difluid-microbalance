@@ -61,5 +61,9 @@ MAX_STORED_BREWS: Final = 20
 # parking backstop) and the live-data push cadence for the card.
 BREW_TICK_INTERVAL: Final = timedelta(seconds=0.25)
 
+# "Prepare brew" switch: turns itself off when no brew started within this
+# time (backstop against a forgotten switch; a running brew suspends it).
+READY_TIMEOUT_SECONDS: Final = 600
+
 CARD_FILENAME: Final = "difluid-brew-card.js"
 CARD_URL: Final = f"/{DOMAIN}/{CARD_FILENAME}"

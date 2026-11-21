@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Generator
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -13,8 +14,10 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from homeassistant.core import HomeAssistant  # noqa: E402
 from homeassistant.helpers.dispatcher import async_dispatcher_connect  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
+from homeassistant.util import dt as dt_util  # noqa: E402
 from pytest_homeassistant_custom_component.common import (  # noqa: E402
     MockConfigEntry,
+    async_fire_time_changed,
 )
 
 from custom_components.difluid_scale import coordinator as coord_mod  # noqa: E402
@@ -22,6 +25,7 @@ from custom_components.difluid_scale.const import (  # noqa: E402
     CARD_URL,
     DOMAIN,
     EVENT_BREW_COMPLETED,
+    READY_TIMEOUT_SECONDS,
     SIGNAL_LIVE,
     STORAGE_KEY,
 )
@@ -39,7 +43,7 @@ from custom_components.difluid_scale.protocol import (  # noqa: E402
 )
 
 ADDR = "AA:BB:CC:DD:EE:FF"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 BREW_ENTITIES = (
     "sensor.microbalance_last_dose",
     "sensor.microbalance_last_yield",
@@ -729,6 +733,10 @@ async def test_live_mode_stream(
     assert (await ws.receive_json())["success"]
     idle = await ws.receive_json()
     assert idle["event"]["type"] == "live_idle"
+    ready = await ws.receive_json()
+    assert ready["event"] == {
+        "type": "live_ready", "ready": False, "dose": None, "entry_id": entry.entry_id
+    }
 
     coord = entry.runtime_data
     scale = Scale(coord, clock)
@@ -761,6 +769,7 @@ async def test_live_mode_stream(
     assert (await ws2.receive_json())["success"]
     late = (await ws2.receive_json())["event"]
     assert late["type"] == "live_start" and late["points"] == points
+    assert (await ws2.receive_json())["event"]["type"] == "live_ready"
 
     # Parked during a BLE drop, then resumed as the same brew.
     scale.disconnect()
@@ -819,6 +828,171 @@ async def test_live_mode_stream(
     assert msgs[0]["type"] == "live_start" and msgs[0]["dose"] is None
     assert msgs[-1]["brew_id"] is None and msgs[-1]["reason"] == "too_short"
     assert coord.brews.brew_count == 1
+
+
+# ------------------------------------------------------------- brew ready
+
+READY = "switch.microbalance_prepare_brew"
+
+
+async def _switch(hass: HomeAssistant, on: bool) -> None:
+    await hass.services.async_call(
+        "switch", "turn_on" if on else "turn_off", {"entity_id": READY}, blocking=True
+    )
+
+
+def _start_brew(scale: Scale, clock: Clock) -> None:
+    scale.weigh_dose(18.0)
+    scale.status(DeviceState.TIMING)
+    scale.timer_start = clock.t
+    scale.run(8, lambda r: max(0.0, round((r - 3) * 1.8, 1)), 1.8)
+
+
+def _finish_brew(scale: Scale) -> None:
+    scale.run(14, lambda r: min(36.0, round((r + 6) * 1.8, 1)), 1.8)
+    scale.frozen = scale.timer()
+    scale.run(6, 36.3)
+
+
+async def _later(hass: HomeAssistant, seconds: float) -> None:
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
+    await hass.async_block_till_done()
+
+
+async def test_brew_ready_switch_manual_and_without_scale(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    # Scale not connected: available (dashboard can be armed beforehand).
+    assert not coord.connected
+    assert _state(hass, READY) == "off"
+    await _switch(hass, True)
+    assert _state(hass, READY) == "on" and coord.brew_ready
+    await _switch(hass, False)
+    assert _state(hass, READY) == "off" and not coord.brew_ready
+    # Not restored: a reload starts off.
+    await _switch(hass, True)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert _state(hass, READY) == "off"
+    # The old instance's backstop is gone with it (no error, stays off).
+    await _later(hass, READY_TIMEOUT_SECONDS + 1)
+    assert _state(hass, READY) == "off"
+
+
+async def test_brew_ready_off_when_brew_stored(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    await _switch(hass, True)
+    _start_brew(scale, clock)
+    await hass.async_block_till_done()
+    assert _state(hass, READY) == "on"
+    _finish_brew(scale)
+    await hass.async_block_till_done()
+    assert coord.brews.brew_count == 1
+    assert _state(hass, READY) == "off"
+
+
+async def test_brew_ready_off_when_run_discarded(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    await _switch(hass, True)
+    scale.status(DeviceState.TIMING)
+    scale.timer_start = clock.t
+    scale.run(3, 0.0)
+    await hass.async_block_till_done()
+    assert coord._live is not None and _state(hass, READY) == "on"  # noqa: SLF001
+    scale.frozen = scale.timer()
+    scale.run(6, 0.0)
+    await hass.async_block_till_done()
+    assert coord.brews.brew_count == 0
+    assert _state(hass, READY) == "off"
+
+
+async def test_brew_ready_backstop(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    await _setup(hass, entry)
+    await _switch(hass, True)
+    await _later(hass, READY_TIMEOUT_SECONDS - 5)
+    assert _state(hass, READY) == "on"
+    await _later(hass, READY_TIMEOUT_SECONDS + 1)
+    assert _state(hass, READY) == "off"
+
+
+async def test_brew_ready_backstop_suspended_while_brewing(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    await _switch(hass, True)
+    _start_brew(scale, clock)
+    await hass.async_block_till_done()
+    await _later(hass, READY_TIMEOUT_SECONDS + 60)
+    assert coord._live is not None  # noqa: SLF001
+    assert _state(hass, READY) == "on"
+    # Turned on during a brew: no backstop either, the brew's end decides.
+    await _switch(hass, False)
+    await _switch(hass, True)
+    await _later(hass, 2 * READY_TIMEOUT_SECONDS + 60)
+    assert _state(hass, READY) == "on"
+    _finish_brew(scale)
+    await hass.async_block_till_done()
+    assert _state(hass, READY) == "off"
+
+
+async def test_brew_ready_websocket(
+    hass: HomeAssistant, hass_ws_client, entry, no_ble, lovelace, clock
+) -> None:
+    await _setup(hass, entry)
+    coord = entry.runtime_data
+    await _switch(hass, True)
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": f"{DOMAIN}/subscribe_live"})
+    assert (await ws.receive_json())["success"]
+    assert (await ws.receive_json())["event"]["type"] == "live_idle"
+    ready = (await ws.receive_json())["event"]
+    assert ready["type"] == "live_ready" and ready["ready"] is True
+
+    await _switch(hass, False)
+    assert (await ws.receive_json())["event"]["ready"] is False
+    await _switch(hass, False)  # unchanged: no message
+    await _switch(hass, True)
+    msg = (await ws.receive_json())["event"]
+    assert msg == {"type": "live_ready", "ready": True, "dose": None, "entry_id": entry.entry_id}
+
+    # The dose of the next brew comes with it as soon as a plateau is known.
+    scale = Scale(coord, clock)
+    scale.weigh_dose(18.0)
+    msg = (await ws.receive_json())["event"]
+    assert msg == {"type": "live_ready", "ready": True, "dose": 18.0, "entry_id": entry.entry_id}
+    await _switch(hass, False)
+    assert (await ws.receive_json())["event"]["dose"] is None
+    await _switch(hass, True)
+    assert (await ws.receive_json())["event"]["dose"] == 18.0
+
+    # Brew end: ready false comes right before live_end.
+    scale = Scale(coord, clock)
+    _start_brew(scale, clock)
+    _finish_brew(scale)
+    await hass.async_block_till_done()
+    types = []
+    while True:
+        m = (await ws.receive_json())["event"]
+        types.append(m["type"])
+        if m["type"] == "live_end":
+            break
+    assert types[0] == "live_start"
+    assert types[-2:] == ["live_ready", "live_end"]
+    assert types.count("live_ready") == 1
 
 
 # ------------------------------------------------------------ config flow

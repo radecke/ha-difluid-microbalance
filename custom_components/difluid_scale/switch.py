@@ -1,4 +1,8 @@
-"""Configuration switches (Func 1 settings) for the DiFluid Microbalance."""
+"""Switches for the DiFluid Microbalance.
+
+Configuration switches (Func 1 settings) and "Prepare brew" (integration
+state for the brew card, not a device setting).
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
-from .entity import DifluidEntity
+from .entity import DifluidEntity, _device_info
 from .protocol import (
     CMD_SETTINGS_AUTO_DETECT_TIMING,
     CMD_SETTINGS_AUTO_STOP_TIMING,
@@ -39,6 +43,13 @@ SWITCHES: tuple[tuple[SwitchEntityDescription, int], ...] = (
 )
 
 
+BREW_READY = SwitchEntityDescription(
+    key="brew_ready",
+    translation_key="brew_ready",
+    icon="mdi:coffee-outline",
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DifluidConfigEntry,
@@ -47,7 +58,10 @@ async def async_setup_entry(
     """Set up setting switches."""
     coordinator = entry.runtime_data
     async_add_entities(
-        DifluidSettingSwitch(coordinator, desc, cmd) for desc, cmd in SWITCHES
+        [
+            *(DifluidSettingSwitch(coordinator, desc, cmd) for desc, cmd in SWITCHES),
+            DifluidBrewReadySwitch(coordinator, BREW_READY),
+        ]
     )
 
 
@@ -77,3 +91,46 @@ class DifluidSettingSwitch(DifluidEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable the setting; the echo updates the state."""
         await self.coordinator.async_set_setting(self._cmd, 0)
+
+
+class DifluidBrewReadySwitch(SwitchEntity):
+    """"Prepare brew": a brew is about to start (card shows an empty chart).
+
+    Integration state kept in the coordinator, so it is available while the
+    scale is off (the dashboard can be armed before the scale connects).
+    Turns itself off when the brew ends or after READY_TIMEOUT_SECONDS
+    without a brew. Not a coordinator entity: writes state only on change.
+    Not restored across restarts (starts off).
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self, coordinator: DifluidCoordinator, description: SwitchEntityDescription
+    ) -> None:
+        """Initialize the switch."""
+        self.coordinator = coordinator
+        self.entity_description = description
+        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._attr_device_info = _device_info(coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the coordinator's brew ready state."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.coordinator.async_add_ready_listener(self.async_write_ha_state)
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while armed."""
+        return self.coordinator.brew_ready
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Arm: the brew card shows an empty live chart."""
+        self.coordinator.async_set_brew_ready(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disarm."""
+        self.coordinator.async_set_brew_ready(False)

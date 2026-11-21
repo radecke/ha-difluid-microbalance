@@ -117,6 +117,9 @@
       },
       "auto_stop_timing": {
         "name": "Auto timer stop"
+      },
+      "brew_ready": {
+        "name": "Prepare brew"
       }
     },
     "select": {

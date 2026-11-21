@@ -24,7 +24,7 @@ from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .brew import BrewResult, BrewTracker
@@ -36,10 +36,11 @@ from .const import (
     CONNECT_RETRIES,
     CONNECT_RETRY_DELAY,
     DOMAIN,
+    READY_TIMEOUT_SECONDS,
     SIGNAL_LIVE,
     STATUS_POLL_INTERVAL,
 )
-from .live import LIVE_IDLE, LiveBrew, end_message
+from .live import LIVE_IDLE, LiveBrew, end_message, ready_message
 from .protocol import (
     CMD_AUTO_SEND_ON,
     CMD_GET_FIRMWARE,
@@ -102,6 +103,7 @@ _TIMER_STOPPED_STATES = {
 _TIMER_RESET_STATES = {DeviceState.IDLE, DeviceState.TIMER_READY}
 
 type KeyEventListener = Callable[[str], None]
+type ReadyListener = Callable[[], None]
 
 type DifluidConfigEntry = ConfigEntry[DifluidCoordinator]
 
@@ -154,6 +156,11 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self.brews = BrewHistory(hass, entry.entry_id, self._device_id)
         self._cancel_brew_tick: CALLBACK_TYPE | None = None
         self._live: LiveBrew | None = None
+        # "Prepare brew" switch: integration state, independent of the scale.
+        self.brew_ready = False
+        self._ready_dose: float | None = None
+        self._cancel_ready_timeout: CALLBACK_TYPE | None = None
+        self._ready_listeners: list[ReadyListener] = []
 
     @property
     def connected(self) -> bool:
@@ -229,6 +236,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._unloading = True
         self._stop_poll()
         self._stop_brew_tick()
+        self._stop_ready_timeout()
         self.brews.set_active(self.brew_tracker.export_active(time.time()))
         if self._live is not None:
             self._live = None
@@ -516,6 +524,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                             time.time(), grams, new_sensor.flow_rate, new_sensor.timer
                         )
                     )
+                    self._refresh_ready_dose()
                 if settings.get(CMD_SETTINGS_WEIGHT_UNIT) != new_sensor.unit:
                     settings = {**settings, CMD_SETTINGS_WEIGHT_UNIT: new_sensor.unit}
                     changed = True
@@ -601,6 +610,9 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             tracker.last_discard_code = None
         if tracker.active and self._live is None:
             self._live = LiveBrew(tracker)
+            # A running brew suspends the backstop; only its end turns the
+            # "Prepare brew" switch off.
+            self._stop_ready_timeout()
             self._send_live(self._live.start_message(tracker, time.time()))
         elif not tracker.active and self._live is not None:
             self._end_live(end_message(reason="ended"))
@@ -629,6 +641,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         # Points recorded since the last tick are not sent: the card shows
         # the stored brew (full profile) next.
         self._live = None
+        # The brew is over (stored or discarded): disarm "Prepare brew".
+        # Sent before live_end so the card never shows the empty ready
+        # chart in between.
+        self.async_set_brew_ready(False)
         self._send_live(message)
 
     @callback
@@ -643,6 +659,76 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         if self._live is None:
             return {"type": LIVE_IDLE}
         return self._live.snapshot(self.brew_tracker, time.time())
+
+    # ---------------------------------------------------------- brew ready
+
+    @callback
+    def async_set_brew_ready(self, ready: bool) -> None:
+        """Arm/disarm "Prepare brew" (the card shows an empty live chart).
+
+        Armed without a brew, it turns itself off after READY_TIMEOUT_SECONDS;
+        while a brew is live only the brew's end turns it off.
+        """
+        if self._unloading:
+            return
+        if ready and self._live is None:
+            self._stop_ready_timeout()
+            self._cancel_ready_timeout = async_call_later(
+                self.hass, READY_TIMEOUT_SECONDS, self._async_ready_timeout
+            )
+        elif not ready:
+            self._stop_ready_timeout()
+        if ready == self.brew_ready:
+            return
+        self.brew_ready = ready
+        _LOGGER.debug("%s: brew ready %s", self.address, ready)
+        self._ready_dose = self.ready_dose() if ready else None
+        self._send_live(ready_message(ready, self._ready_dose))
+        for listener in list(self._ready_listeners):
+            listener()
+
+    def ready_dose(self) -> float | None:
+        """Dose the next brew would get (shown in the ready view)."""
+        return self.brew_tracker.next_dose(time.time())
+
+    def ready_snapshot(self) -> dict:
+        """``live_ready`` for a new subscriber."""
+        return ready_message(self.brew_ready, self.ready_dose() if self.brew_ready else None)
+
+    @callback
+    def _refresh_ready_dose(self) -> None:
+        """Resend ``live_ready`` when the dose for the next brew changes."""
+        if not self.brew_ready or self._live is not None:
+            return
+        dose = self.ready_dose()
+        if dose != self._ready_dose:
+            self._ready_dose = dose
+            self._send_live(ready_message(True, dose))
+
+    @callback
+    def _async_ready_timeout(self, _now: datetime) -> None:
+        self._cancel_ready_timeout = None
+        if self._live is None:
+            _LOGGER.debug("%s: no brew started, brew ready off", self.address)
+            self.async_set_brew_ready(False)
+
+    @callback
+    def _stop_ready_timeout(self) -> None:
+        if self._cancel_ready_timeout is not None:
+            self._cancel_ready_timeout()
+            self._cancel_ready_timeout = None
+
+    @callback
+    def async_add_ready_listener(self, listener: ReadyListener) -> CALLBACK_TYPE:
+        """Register a callback for brew ready changes; return unsubscribe."""
+        self._ready_listeners.append(listener)
+
+        @callback
+        def _remove() -> None:
+            if listener in self._ready_listeners:
+                self._ready_listeners.remove(listener)
+
+        return _remove
 
     @callback
     def _stop_brew_tick(self) -> None:

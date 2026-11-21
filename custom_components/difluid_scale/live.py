@@ -13,6 +13,12 @@ Messages (sent as events of ``difluid_scale/subscribe_live``):
   ``reason`` (``too_short`` / ``low_yield`` / ``no_samples`` / ``unloaded``)
   and an English ``detail``.
 - ``live_idle``: sent once on subscribe when no brew is active.
+- ``live_ready``: ``ready`` (bool), the state of the "Prepare brew" switch,
+  ``dose`` (dose the next brew would get, or None; resent when it changes)
+  (brew about to start: the card shows an empty live chart). Sent on
+  subscribe right after ``live_start`` / ``live_idle``, and whenever the
+  switch changes. When a brew ends, ``ready: false`` comes just before its
+  ``live_end``.
 
 Current values: ``weight``, ``flow``, ``timer`` (scale), ``elapsed`` (s since
 start; frozen at the stop once the timer stopped), ``phase`` (``brewing`` /
@@ -30,6 +36,7 @@ LIVE_START = "live_start"
 LIVE_POINTS = "live_points"
 LIVE_END = "live_end"
 LIVE_IDLE = "live_idle"
+LIVE_READY = "live_ready"
 
 
 class LiveBrew:
@@ -118,3 +125,9 @@ def end_message(
         "reason": reason,
         "detail": detail,
     }
+
+
+def ready_message(ready: bool, dose: float | None = None) -> dict[str, Any]:
+    """``live_ready``: whether a brew is about to start (switch state), with
+    the dose the next brew would get (None when no dose plateau is known)."""
+    return {"type": LIVE_READY, "ready": ready, "dose": dose if ready else None}

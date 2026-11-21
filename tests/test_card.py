@@ -29,3 +29,16 @@ def test_card_subscribe_retry() -> None:
         timeout=60,
     )
     assert "4 scenarios OK" in out.stdout
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_card_flow_and_ready() -> None:
+    """Flow from weight (monotone weight + trailing slope) and the ready view."""
+    out = subprocess.run(
+        [NODE, str(HERE / "card_flow_test.mjs")],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "7 scenarios OK" in out.stdout

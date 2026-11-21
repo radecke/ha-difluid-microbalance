@@ -10,9 +10,20 @@
  *
  * Replay: a stored brew can be played back in real time through the same
  * live view (points released by their recorded time, 0.25 s batches).
+ *
+ * Ready: while the integration's "Prepare brew" switch is on (live_ready)
+ * and no brew runs, the live view shows empty axes and zero values; the
+ * brew then continues in it seamlessly.
+ *
+ * Flow curve (flow_smoothing > 0): recomputed from the weight instead of the
+ * scale's flow value, which is a trailing ~3 s regression (lags 1-1.5 s).
+ * The weight may only rise (vibration makes it fall back after upward
+ * jumps; drops are ignored), then flow = least-squares slope over the last
+ * flow_smoothing seconds. Both use only earlier points, so the live curve is
+ * never revised. Plotted weight, hover and live stats use these values.
  */
 
-const CARD_VERSION = "0.3.0";
+const CARD_VERSION = "0.3.1";
 const DOMAIN = "difluid_scale";
 
 const STRINGS = {
@@ -48,6 +59,9 @@ const STRINGS = {
     replay_stop: "Stop replay",
     chart_height: "Chart height",
     chart_height_helper: "Pixels (e.g. 320) or \"fill\" to fill the screen below the card's top. Empty: default.",
+    ready: "Ready – brew starts soon",
+    flow_smoothing: "Flow smoothing",
+    flow_smoothing_helper: "Seconds (0–10): flow curve computed from the weight over this window. 0: the scale's raw values. Empty: 3.",
   },
   de: {
     title: "Espresso",
@@ -81,6 +95,9 @@ const STRINGS = {
     replay_stop: "Wiedergabe beenden",
     chart_height: "Diagrammhöhe",
     chart_height_helper: "Pixel (z. B. 320) oder \"fill\", um den Bildschirm unterhalb des Kartenanfangs zu füllen. Leer: Standard.",
+    ready: "Bereit – Bezug startet gleich",
+    flow_smoothing: "Flussglättung",
+    flow_smoothing_helper: "Sekunden (0–10): Flusskurve aus dem Gewicht über dieses Fenster berechnet. 0: Rohwerte der Waage. Leer: 3.",
   },
 };
 
@@ -105,6 +122,13 @@ const RETRY_MS = [2000, 5000, 10000, 30000];
 // time, faster when behind) instead of jumping with every 0.25 s batch.
 const REVEAL_LAG = 0.3; // s behind the newest point before catching up
 const REVEAL_MAX_LAG = 1.5; // never further behind than this
+// Flow from weight (see the header). Window in seconds; 0 = raw scale values.
+const FLOW_SMOOTHING_DEFAULT = 3;
+const FLOW_SMOOTHING_MAX = 10;
+// Flow starts at the first point this far above the initial weight (g);
+// before it flow is 0, so the centred window shows no flow before the drops.
+const FLOW_START_DELTA = 1.0;
+const FLOW_MIN_POINTS = 3; // fewer points in the window: flow 0
 const reducedMotion = () =>
   typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -168,6 +192,80 @@ function monotonePath(xy) {
   return d;
 }
 
+// Weight that only rises: a drop (machine vibration, the load cell springing
+// back after a jump) is ignored, the last maximum is held. Causal, so a
+// point once drawn never changes when later points arrive.
+function monotone(values) {
+  const out = [];
+  let max = -Infinity;
+  for (const v of values) {
+    if (v > max) max = v;
+    out.push(max);
+  }
+  return out;
+}
+
+// Flow at each point: least-squares slope of the weight over the points in
+// [t - window, t] (only earlier points: the live curve is never revised). >= FLOW_MIN_POINTS points or 0;
+// never negative; 0 before the flow starts (FLOW_START_DELTA).
+function smoothedFlow(times, weights, window) {
+  const n = times.length;
+  const out = new Array(n).fill(0);
+  if (!n) return out;
+  let first = n;
+  for (let i = 0; i < n; i++) {
+    if (weights[i] > weights[0] + FLOW_START_DELTA) {
+      first = i;
+      break;
+    }
+  }
+  let lo = 0;
+  for (let i = 0; i < n; i++) {
+    const t = times[i];
+    while (lo < i && times[lo] < t - window - 1e-9) lo++;
+    const hi = i;
+    const count = hi - lo + 1;
+    if (i < first || count < FLOW_MIN_POINTS) continue;
+    let st = 0;
+    let sw = 0;
+    for (let j = lo; j <= hi; j++) {
+      st += times[j];
+      sw += weights[j];
+    }
+    const mt = st / count;
+    const mw = sw / count;
+    let num = 0;
+    let den = 0;
+    for (let j = lo; j <= hi; j++) {
+      const d = times[j] - mt;
+      num += d * (weights[j] - mw);
+      den += d * d;
+    }
+    out[i] = den > 0 ? Math.max(0, num / den) : 0;
+  }
+  return out;
+}
+
+// Points as drawn: [t, monotone weight, flow from weight]; the raw points
+// unchanged for smoothing 0.
+function displayProfile(points, smoothing) {
+  if (!smoothing || !points.length) return points;
+  const times = points.map((p) => p[0]);
+  const weights = monotone(points.map((p) => p[1]));
+  const flow = smoothedFlow(times, weights, smoothing);
+  return points.map((p, i) => [p[0], weights[i], flow[i]]);
+}
+
+// flow_smoothing option: absent -> default, else seconds 0..max.
+function parseFlowSmoothing(value) {
+  if (value === undefined || value === null || value === "") return FLOW_SMOOTHING_DEFAULT;
+  const v = typeof value === "string" && /^\s*\d+(\.\d+)?\s*$/.test(value) ? Number(value) : value;
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= FLOW_SMOOTHING_MAX) return v;
+  throw new Error(
+    `flow_smoothing must be a number of seconds from 0 to ${FLOW_SMOOTHING_MAX} (0 = the scale's raw flow), got ${JSON.stringify(value)}`
+  );
+}
+
 function svgEl(name, attrs) {
   const el = document.createElementNS(SVG_NS, name);
   for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, String(v));
@@ -223,6 +321,10 @@ class DifluidBrewCard extends HTMLElement {
     this._liveAxes = null;
     this._liveUnsub = null;
     this._liveIdles = 0; // live_idle messages since our own subscribe
+    this._ready = false; // "Prepare brew" switch (live_ready)
+    this._readyDose = null; // dose of the next brew (live_ready)
+    this._smoothing = FLOW_SMOOTHING_DEFAULT;
+    this._displayCache = new WeakMap(); // points array -> displayed points
     this._readyConn = null;
     this._onReady = () => {
       // Reconnected: make what failed meanwhile, then reload.
@@ -256,6 +358,7 @@ class DifluidBrewCard extends HTMLElement {
   setConfig(config) {
     if (!config) throw new Error("Invalid configuration");
     const heightMode = parseChartHeight(config.chart_height);
+    this._smoothing = parseFlowSmoothing(config.flow_smoothing);
     const changed =
       JSON.stringify(targetOf(config)) !== JSON.stringify(targetOf(this._config));
     this._config = { ...config };
@@ -265,6 +368,8 @@ class DifluidBrewCard extends HTMLElement {
       this._cache.clear();
       this._index = 0;
       this._error = null;
+      this._ready = false;
+      this._readyDose = null;
       this._setLive(null);
       if (this._hass && this.isConnected) {
         this._unsubscribe();
@@ -562,6 +667,17 @@ class DifluidBrewCard extends HTMLElement {
       this._index = 0;
       this._render();
       this._load(null);
+    } else if (msg.type === "live_ready") {
+      const ready = !!msg.ready;
+      const dose = ready && msg.dose != null ? msg.dose : null;
+      if (ready === this._ready && dose === this._readyDose) return;
+      this._ready = ready;
+      this._readyDose = dose;
+      // Only the empty ready view changes; a live brew or replay goes on.
+      if (!this._live) {
+        this._hover = null;
+        this._render();
+      }
     } else if (msg.type === "live_idle") {
       const resubscribed = this._liveIdles++ > 0;
       if (this._live && !this._live.replay) {
@@ -622,7 +738,7 @@ class DifluidBrewCard extends HTMLElement {
   // Grow-only targets; the drawn range eases towards them (see _frame).
   _growAxes(snap) {
     const l = this._live;
-    const pts = l.points;
+    const pts = this._display(l.points); // the displayed (smoothed) values
     let fMax = 0;
     let wMax = 0;
     const tLast = pts.length ? pts[pts.length - 1][0] : 0;
@@ -630,8 +746,9 @@ class DifluidBrewCard extends HTMLElement {
       if (p[2] > fMax) fMax = p[2];
       if (p[1] > wMax) wMax = p[1];
     }
-    if (l.weight > wMax) wMax = l.weight;
-    if (l.flow > fMax) fMax = l.flow;
+    const now = this._liveNow();
+    if (now.weight > wMax) wMax = now.weight;
+    if (now.flow > fMax) fMax = now.flow;
     const tSpan = Math.max(tLast, l.elapsed || 0) + 3;
     const tNeed = Math.max(LIVE_MIN.t, Math.ceil(tSpan / LIVE_T_STEP) * LIVE_T_STEP);
     const fNeed = axis(fMax * 1.1, LIVE_MIN.f, 4).max;
@@ -693,10 +810,39 @@ class DifluidBrewCard extends HTMLElement {
     return true;
   }
 
-  // Live points up to the drawn end, with an interpolated end point.
-  _liveVisible() {
+  // Displayed points (see displayProfile), cached per points array; live
+  // and replay arrays only grow, so their length tells when to recompute.
+  _display(points) {
+    const hit = this._displayCache.get(points);
+    if (hit && hit.length === points.length && hit.smoothing === this._smoothing) {
+      return hit.out;
+    }
+    const out = displayProfile(points, this._smoothing);
+    this._displayCache.set(points, { length: points.length, smoothing: this._smoothing, out });
+    return out;
+  }
+
+  // Current live flow and weight as displayed: the smoothed values at the
+  // newest point (the scale's values with smoothing 0 or before any point).
+  _liveNow() {
     const l = this._live;
-    const pts = l.points;
+    if (!l) return { weight: 0, flow: 0 };
+    if (this._smoothing && l.points.length) {
+      const pts = this._display(l.points);
+      const last = pts[pts.length - 1];
+      return { weight: last[1], flow: last[2] };
+    }
+    return { weight: l.weight, flow: l.flow };
+  }
+
+  // Ready view: "Prepare brew" is on and no brew (or replay) is showing.
+  _readyView() {
+    return this._ready && !this._live;
+  }
+
+  // Live points up to the drawn end, with an interpolated end point.
+  _liveVisible(pts) {
+    const l = this._live;
     const drawT = l.drawT == null ? Infinity : l.drawT;
     let k = pts.length;
     while (k > 0 && pts[k - 1][0] > drawT) k--;
@@ -955,16 +1101,17 @@ class DifluidBrewCard extends HTMLElement {
     e.next.title = this._t("newer");
     e.next.setAttribute("aria-label", this._t("newer"));
     e.note.textContent = this._note || "";
-    e.note.classList.toggle("hidden", !this._note || !!this._live);
+    const readyView = this._readyView();
+    e.note.classList.toggle("hidden", !this._note || !!this._live || readyView);
     e.badge.classList.toggle("hidden", !this._live);
-    e.stats.classList.toggle("live", !!this._live);
+    e.stats.classList.toggle("live", !!this._live || readyView);
     const replaying = !!(this._live && this._live.replay);
     const replayLabel = this._t(replaying ? "replay_stop" : "replay_start");
     e.replay.title = replayLabel;
     e.replay.setAttribute("aria-label", replayLabel);
     e.replayIcon.setAttribute("d", replaying ? ICON_STOP : ICON_PLAY);
     e.nav.classList.toggle("replaying", replaying);
-    if (this._live) {
+    if (this._live || readyView) {
       e.message.classList.add("hidden");
       // A real live brew has no navigation; a replay keeps its stop button.
       e.nav.classList.toggle("hidden", !replaying);
@@ -1032,22 +1179,33 @@ class DifluidBrewCard extends HTMLElement {
   _renderLiveStats() {
     const e = this._els;
     const l = this._live;
-    if (!e || !l) return;
-    const phase = l.phase || "brewing";
-    e.badgeText.textContent = this._t(l.replay ? "replay" : "live");
-    e.badge.classList.toggle("parked", phase === "parked");
-    e.badge.classList.toggle("tail", phase === "tail");
-    e.when.textContent = this._t(phase) || "";
+    if (!e || (!l && !this._readyView())) return;
+    let elapsed = 0;
+    let now = { weight: 0, flow: 0 };
+    let dose = null;
+    if (l) {
+      const phase = l.phase || "brewing";
+      e.badgeText.textContent = this._t(l.replay ? "replay" : "live");
+      e.badge.classList.toggle("parked", phase === "parked");
+      e.badge.classList.toggle("tail", phase === "tail");
+      e.when.textContent = this._t(phase) || "";
+      elapsed = this._liveElapsed();
+      now = this._liveNow();
+      dose = l.dose;
+    } else {
+      e.when.textContent = this._t("ready");
+      dose = this._readyDose;
+    }
     const stat = (cls, label, value, unit) => `
       <div class="stat ${cls}">
         <div class="label">${label}</div>
         <div class="value">${value}${unit ? `<span class="unit">${unit}</span>` : ""}</div>
       </div>`;
     const html =
-      stat("big", this._t("time"), this._fmt(this._liveElapsed(), 1), "s") +
-      stat("big flow", this._t("flow_rate"), this._fmt(l.flow, 1), "g/s") +
-      stat("big", this._t("weight"), this._fmt(l.weight, 1), "g") +
-      stat("", this._t("dose"), this._fmt(l.dose, 1), l.dose == null ? "" : "g");
+      stat("big", this._t("time"), this._fmt(elapsed, 1), "s") +
+      stat("big flow", this._t("flow_rate"), this._fmt(now.flow, 1), "g/s") +
+      stat("big", this._t("weight"), this._fmt(now.weight, 1), "g") +
+      stat("", this._t("dose"), this._fmt(dose, 1), dose == null ? "" : "g");
     if (html !== this._lastStatsHtml) {
       e.stats.innerHTML = html;
       this._lastStatsHtml = html;
@@ -1071,10 +1229,20 @@ class DifluidBrewCard extends HTMLElement {
   _currentBrew() {
     if (this._live) {
       const l = this._live;
-      return { profile: this._liveVisible(), duration: l.phase === "tail" ? l.stop : null, live: true };
+      return { profile: l.points, duration: l.phase === "tail" ? l.stop : null, live: true };
     }
     const summary = this._brews && this._brews[this._index];
     return summary ? this._cache.get(summary.id) : null;
+  }
+
+  // What the chart draws: displayed points (live: up to the drawn end);
+  // the ready view is an empty live chart.
+  _chartBrew() {
+    if (this._readyView()) return { profile: [], duration: null, live: true };
+    const brew = this._currentBrew();
+    if (!brew) return null;
+    const pts = this._display(brew.profile || []);
+    return { ...brew, profile: brew.live ? this._liveVisible(pts) : pts };
   }
 
   _geometry(brew) {
@@ -1088,9 +1256,11 @@ class DifluidBrewCard extends HTMLElement {
     let tMax;
     let fMax;
     let wMax;
-    if (brew.live && this._liveAxes) {
+    if (brew.live) {
       // Ticks from the target range, drawn on the (easing) current range.
-      const a = this._liveAxes;
+      // Ready view (no live axes yet): the range a live brew starts with.
+      const start = (v) => ({ cur: v, target: v });
+      const a = this._liveAxes || { t: start(LIVE_MIN.t), f: start(LIVE_MIN.f), w: start(LIVE_MIN.w) };
       const keep = (ax, max) => ({ ...ax, ticks: ax.ticks.filter((v) => v <= max + 1e-6) });
       tMax = a.t.cur;
       fMax = a.f.cur;
@@ -1134,7 +1304,7 @@ class DifluidBrewCard extends HTMLElement {
     const box = this._chartBox;
     if (!box) return;
     box.textContent = "";
-    const brew = this._currentBrew();
+    const brew = this._chartBrew();
     // Live: draw the empty axes right away, the lines grow into them.
     if (!brew || (!(brew.profile || []).length && !brew.live)) return;
     const g = this._geometry(brew);
@@ -1287,8 +1457,8 @@ class DifluidBrewCard extends HTMLElement {
   }
 
   _onPointer(ev) {
-    if (this._live) return;
-    const brew = this._currentBrew();
+    if (this._live || this._readyView()) return;
+    const brew = this._chartBrew();
     if (!brew || !(brew.profile || []).length) return;
     const g = this._geometry(brew);
     const rect = this._chartBox.getBoundingClientRect();
@@ -1321,9 +1491,11 @@ class DifluidBrewCardEditor extends HTMLElement {
     if (!this._form) {
       this._form = document.createElement("ha-form");
       this._form.computeLabel = (schema) =>
-        ({ device_id: s.device, chart_height: s.chart_height }[schema.name] || s.card_title);
+        ({ device_id: s.device, chart_height: s.chart_height, flow_smoothing: s.flow_smoothing }[
+          schema.name
+        ] || s.card_title);
       this._form.computeHelper = (schema) =>
-        schema.name === "chart_height" ? s.chart_height_helper : undefined;
+        ({ chart_height: s.chart_height_helper, flow_smoothing: s.flow_smoothing_helper }[schema.name]);
       this._form.addEventListener("value-changed", (ev) => {
         const value = { ...ev.detail.value };
         for (const k of Object.keys(value)) {
@@ -1348,6 +1520,10 @@ class DifluidBrewCardEditor extends HTMLElement {
       { name: "device_id", selector: { device: { integration: DOMAIN } } },
       { name: "title", selector: { text: {} } },
       { name: "chart_height", selector: { text: {} } },
+      {
+        name: "flow_smoothing",
+        selector: { number: { min: 0, max: FLOW_SMOOTHING_MAX, step: 0.5, mode: "box", unit_of_measurement: "s" } },
+      },
     ];
     this._form.hass = this._hass;
     // The text field shows numbers as strings.
@@ -1356,6 +1532,9 @@ class DifluidBrewCardEditor extends HTMLElement {
     this._form.data = data;
   }
 }
+
+// Pure helpers, for tests (tests/card_flow_test.mjs).
+DifluidBrewCard.math = { monotone, smoothedFlow, displayProfile, parseFlowSmoothing };
 
 if (!customElements.get("difluid-brew-card")) {
   customElements.define("difluid-brew-card", DifluidBrewCard);

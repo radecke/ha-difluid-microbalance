@@ -88,10 +88,10 @@ The integration ships a Lovelace card and registers it as a dashboard resource a
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/brew-card-dark.png">
-  <img alt="Brew card showing a real espresso: 15.9 g dose, 44.3 g yield (target 44.5 g), ratio 1:2.79, 39.0 s, with bean and shot metrics" src="docs/brew-card-light.png" width="720">
+  <img alt="Brew card showing a real espresso: 16.0 g dose, 44.2 g yield (target 44.8 g), ratio 1:2.76, 25.5 s, with bean and shot metrics" src="docs/brew-card-light.png" width="720">
 </picture>
 
-<sub>A real brew recorded by the integration with the auto-stop (default <code>flow_smoothing: 3</code>): 15.9 g dose, 44.3 g yield, 39.0 s.</sub>
+<sub>A real brew recorded by the integration with the auto-stop (default <code>flow_smoothing: 3</code>): 16.0 g dose, 44.2 g yield, 25.5 s.</sub>
 
 ```yaml
 type: custom:difluid-brew-card

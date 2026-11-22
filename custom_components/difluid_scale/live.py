@@ -27,6 +27,7 @@ start; frozen at the stop once the timer stopped), ``phase`` (``brewing`` /
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -42,11 +43,25 @@ LIVE_READY = "live_ready"
 class LiveBrew:
     """Points and current values of the active brew, as sent so far."""
 
-    def __init__(self, tracker: BrewTracker) -> None:
-        """Start following the tracker's active brew."""
+    def __init__(
+        self,
+        tracker: BrewTracker,
+        target_fn: Callable[[float, float | None], dict[str, Any] | None]
+        | None = None,
+        cut_fn: Callable[[float], float | None] | None = None,
+    ) -> None:
+        """Start following the tracker's active brew.
+
+        ``target_fn(start, dose)`` gives the auto-stop target shown with the
+        live values (``target``, ``target_source``; None = auto-stop off);
+        ``cut_fn(start)`` the seconds to the auto-stop cut (pump off), where
+        the brew time stops while the weighing goes on.
+        """
         assert tracker.start is not None
         self.start: float = tracker.start
         self.dose = tracker.dose_candidate
+        self._target_fn = target_fn
+        self._cut_fn = cut_fn
         self.points: list[list[float]] = []
         self._key = -1
         self._last_current: dict[str, Any] | None = None
@@ -54,12 +69,17 @@ class LiveBrew:
     def _current(self, tracker: BrewTracker, now: float) -> dict[str, Any]:
         sample = tracker.last_sample
         stop = tracker.stop_elapsed
-        elapsed = stop if stop is not None else max(0.0, now - self.start)
+        cut = self._cut_fn(self.start) if self._cut_fn else None
+        if cut is not None:
+            elapsed = cut  # brew time ends at the cut (pump off)
+        else:
+            elapsed = stop if stop is not None else max(0.0, now - self.start)
         weight = flow = timer = None
         if sample is not None and sample[0] >= self.start - 10:
             _, weight, flow, timer = sample
             weight = round(weight, 1)
             flow = round(flow, 1)
+        target = self._target_fn(self.start, self.dose) if self._target_fn else None
         return {
             "weight": weight,
             "flow": flow,
@@ -67,6 +87,9 @@ class LiveBrew:
             "elapsed": round(elapsed, 1),
             "phase": tracker.state,
             "stop": stop,
+            "cut": cut,
+            "target": target["target"] if target else None,
+            "target_source": target["target_source"] if target else None,
         }
 
     def _collect(self, tracker: BrewTracker) -> list[list[float]]:
@@ -127,7 +150,19 @@ def end_message(
     }
 
 
-def ready_message(ready: bool, dose: float | None = None) -> dict[str, Any]:
+def ready_message(
+    ready: bool,
+    dose: float | None = None,
+    target: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """``live_ready``: whether a brew is about to start (switch state), with
-    the dose the next brew would get (None when no dose plateau is known)."""
-    return {"type": LIVE_READY, "ready": ready, "dose": dose if ready else None}
+    the dose the next brew would get (None when no dose plateau is known)
+    and the auto-stop target it would get (None when the auto-stop is off)."""
+    target = target if ready else None
+    return {
+        "type": LIVE_READY,
+        "ready": ready,
+        "dose": dose if ready else None,
+        "target": target["target"] if target else None,
+        "target_source": target["target_source"] if target else None,
+    }

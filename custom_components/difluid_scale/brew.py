@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import math
+from statistics import median
 
 PROFILE_RESOLUTION = 0.25  # seconds per profile point
 PROFILE_MAX_POINTS = 400
@@ -273,10 +274,32 @@ class BrewTracker:
         self._reopened = False
         # Timer value at t0 (see _next_base).
         self._base = 0
+        # Capture tail for this brew if not tail_seconds (end_without_tail).
+        self._tail_override: float | None = None
         # After a gap the timer value of the first frame, (t, timer): the
         # timer only counts as running once a later frame shows a higher one
         # (it may have stopped just before that frame).
         self._probe: tuple[float, int] | None = None
+
+    @property
+    def _tail_seconds(self) -> float:
+        if self._tail_override is not None:
+            return self._tail_override
+        return self.config.tail_seconds
+
+    def end_without_tail(self) -> None:
+        """End the active brew at its timer stop, without the capture tail.
+
+        For a timer stopped by the auto-stop after the weight was calm plus
+        tail_seconds: the drips are in, and the paused scale sends no weight
+        that a further tail could add.
+        """
+        if self.active:
+            self._tail_override = 0.0
+
+    def keep_tail(self) -> None:
+        """Undo end_without_tail (the auto-stop could not stop the timer)."""
+        self._tail_override = None
 
     def set_config(self, config: BrewConfig) -> None:
         """Apply new thresholds (takes effect immediately)."""
@@ -472,7 +495,7 @@ class BrewTracker:
                 # (or the disconnect) tell; the grace period is the backstop.
                 self._park(t)
                 return None
-        if self.state == TAIL and t >= self._stop_t + self.config.tail_seconds:
+        if self.state == TAIL and t >= self._stop_t + self._tail_seconds:
             return self._finish()
         return None
 
@@ -592,7 +615,7 @@ class BrewTracker:
         Its weight is the yield (drips done), recorded at the tail end; a
         lift is cut off by ``_cut_at_lift`` as usual.
         """
-        end = self._stop_t + self.config.tail_seconds
+        end = self._stop_t + self._tail_seconds
         if t > end:
             self._record(end - 1e-6, weight, flow)
 
@@ -743,7 +766,7 @@ class BrewTracker:
         self, truncated: bool = False, resumable: bool = True
     ) -> BrewResult | None:
         cfg = self.config
-        end = self._stop_t + (0.0 if truncated else cfg.tail_seconds)
+        end = self._stop_t + (0.0 if truncated else self._tail_seconds)
         points = [p for _, p in sorted(self._buckets.items()) if p[0] <= end - self._t0]
         points = self._cut_at_lift(points)
         duration = round(self._stop_t - self._t0, 1)
@@ -978,6 +1001,148 @@ def _derive_flow(
         flow = (w - wj) / (t - tj) if t - tj > 1e-6 else 0.0
         out.append((t, w, max(0.0, flow) if math.isfinite(flow) else 0.0))
     return out
+
+
+# ------------------------------------------------------------ metrics
+#
+# Shot metrics from a stored profile ([t, weight, flow], t = s since the
+# timer start). The flow is the one the brew card draws by default
+# (flow_smoothing 3): the weight made monotone (pump vibration makes it fall
+# back after upward jumps), then the least-squares slope over the trailing
+# METRICS_FLOW_WINDOW seconds, 0 before the weight is FLOW_START_DELTA above
+# its start. Same constants as the card (FLOW_START_DELTA, FLOW_MIN_POINTS).
+
+# First drop: the weight is at least FIRST_DROP_GRAMS above the baseline and
+# stays there for FIRST_DROP_SUSTAIN seconds (the profile must cover that
+# second). Baseline: the median of the first FIRST_DROP_BASELINE seconds,
+# at most 0 (a tared cup; above FIRST_DROP_GRAMS the cup was not tared and
+# there is no first drop). Pump vibration moves the empty cup by 0.1-1.0 g;
+# the first coffee shows from about 2 g.
+FIRST_DROP_GRAMS = 1.5
+FIRST_DROP_SUSTAIN = 1.0  # s
+FIRST_DROP_BASELINE = 1.0  # s
+FLOW_START_DELTA = 1.0  # g, the card's FLOW_START_DELTA
+METRICS_FLOW_WINDOW = 3.0  # s, the card's default flow_smoothing
+_METRICS_MIN_POINTS = 3
+# Main phase: from 20 % to 90 % of the final (monotone) weight (the ramp of
+# the first drops and the end of the shot left out).
+MAIN_PHASE_LOW = 0.2
+MAIN_PHASE_HIGH = 0.9
+
+
+def monotone_weights(weights: list[float]) -> list[float]:
+    """Running maximum: a drop is ignored, the last maximum held."""
+    out: list[float] = []
+    top = -math.inf
+    for w in weights:
+        top = max(top, w)
+        out.append(top)
+    return out
+
+
+def smoothed_flow(
+    times: list[float], weights: list[float], window: float = METRICS_FLOW_WINDOW
+) -> list[float]:
+    """Least-squares slope of ``weights`` over [t - window, t] (>= 0).
+
+    The brew card's ``smoothedFlow``: 0 until the weight is more than
+    FLOW_START_DELTA above its first value and with fewer than three points
+    in the window.
+    """
+    n = len(times)
+    out = [0.0] * n
+    if not n:
+        return out
+    first = next(
+        (i for i in range(n) if weights[i] > weights[0] + FLOW_START_DELTA), n
+    )
+    lo = 0
+    for i in range(first, n):
+        t = times[i]
+        while lo < i and times[lo] < t - window - 1e-9:
+            lo += 1
+        count = i - lo + 1
+        if count < _METRICS_MIN_POINTS:
+            continue
+        ts = times[lo : i + 1]
+        ws = weights[lo : i + 1]
+        mt = sum(ts) / count
+        mw = sum(ws) / count
+        den = sum((x - mt) ** 2 for x in ts)
+        num = sum((x - mt) * (y - mw) for x, y in zip(ts, ws))
+        out[i] = max(0.0, num / den) if den > 0 else 0.0
+    return out
+
+
+def first_drop_time(points: list) -> float | None:
+    """Seconds from the timer start to the first sustained drop, or None."""
+    if not points:
+        return None
+    t0 = float(points[0][0])
+    baseline = median(
+        float(p[1]) for p in points if float(p[0]) <= t0 + FIRST_DROP_BASELINE
+    )
+    if baseline > FIRST_DROP_GRAMS:
+        return None  # container not tared: no reference for the first drop
+    threshold = min(0.0, baseline) + FIRST_DROP_GRAMS
+    n = len(points)
+    for i in range(n):
+        t = float(points[i][0])
+        if float(points[i][1]) < threshold:
+            continue
+        held = True
+        covered = False
+        for j in range(i + 1, n):
+            tj = float(points[j][0])
+            if tj > t + FIRST_DROP_SUSTAIN:
+                covered = True
+                break
+            if float(points[j][1]) < threshold:
+                held = False
+                break
+            if tj >= t + FIRST_DROP_SUSTAIN:
+                covered = True
+        if held and covered:
+            return round(max(0.0, t), 1)
+    return None
+
+
+def brew_metrics(points: list) -> dict[str, float | None] | None:
+    """Time to first drop, peak flow, main-phase mean flow and its CV.
+
+    ``None`` without a profile. Values that cannot be computed (no drop,
+    too few points in the main phase) are None.
+    """
+    if not points:
+        return None
+    times = [float(p[0]) for p in points]
+    weights = monotone_weights([float(p[1]) for p in points])
+    flow = smoothed_flow(times, weights)
+    metrics: dict[str, float | None] = {
+        "first_drop": first_drop_time(points),
+        "peak_flow": round(max(flow), 1) if any(flow) else None,
+        "mean_flow": None,
+        "flow_cv": None,
+    }
+    base = weights[0]
+    gain = weights[-1] - base
+    if gain <= FLOW_START_DELTA:
+        return metrics
+    low = base + MAIN_PHASE_LOW * gain
+    high = base + MAIN_PHASE_HIGH * gain
+    i_lo = next(i for i, w in enumerate(weights) if w >= low)
+    i_hi = next(i for i, w in enumerate(weights) if w >= high)
+    if times[i_hi] - times[i_lo] > 1e-6:
+        metrics["mean_flow"] = round(
+            (weights[i_hi] - weights[i_lo]) / (times[i_hi] - times[i_lo]), 2
+        )
+    phase = flow[i_lo : i_hi + 1]
+    if len(phase) >= _METRICS_MIN_POINTS:
+        avg = sum(phase) / len(phase)
+        if avg > 0:
+            std = math.sqrt(sum((f - avg) ** 2 for f in phase) / len(phase))
+            metrics["flow_cv"] = round(std / avg, 2)
+    return metrics
 
 
 def correct_dose(brew: dict, dose: float) -> float:

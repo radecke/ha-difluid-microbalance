@@ -242,4 +242,158 @@ function makeCard(config = {}) {
   scenarios++;
 }
 
+// 8. Detail line of a stored brew: bean and shot metrics, missing parts
+//    left out (brews stored before 0.5.0 have neither).
+{
+  const card = makeCard();
+  const brew = {
+    bean: "Kenya Kiambu",
+    metrics: { first_drop: 8.8, peak_flow: 3.3, mean_flow: 2.8, flow_cv: 0.19 },
+  };
+  assert.equal(
+    card._detailText(brew),
+    "Kenya Kiambu · first drop 8.8 s · peak flow 3.3 g/s · Ø 2.8 g/s ±19 %"
+  );
+  assert.equal(
+    card._detailText({ metrics: { first_drop: 12.3, peak_flow: null, mean_flow: 2.6, flow_cv: null } }),
+    "first drop 12.3 s · Ø 2.6 g/s"
+  );
+  assert.equal(card._detailText({ bean: null }), "");
+  assert.equal(card._detailText({}), "");
+  card._hass = { language: "de" };
+  assert.equal(
+    card._detailText(brew),
+    "Kenya Kiambu · erster Tropfen 8,8 s · Spitzenfluss 3,3 g/s · Ø 2,8 g/s ±19 %"
+  );
+  // The line keeps its space in the live view (visibility, not display):
+  // the header height does not change when the brew ends.
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(path.join(here, "../custom_components/difluid_scale/www/difluid-brew-card.js"), "utf8")
+  );
+  assert.match(src, /\.detail \{[^}]*min-height: 1\.3em/);
+  assert.ok(!/detail\.classList\.(add|toggle)\("hidden"/.test(src), "detail never display:none");
+  scenarios++;
+}
+
+// 9. Target line: live (from live_start/live_points), ready (live_ready),
+//    stored (brew.target), auto-stop off (null) -> empty but reserved.
+{
+  const notes = (card) =>
+    [...card._els.stats.innerHTML.matchAll(/class="stat-note">([^<]*)</g)].map((m) => m[1]);
+  const card = makeCard();
+  card._onLive({ type: "live_ready", ready: true, dose: 16, target: 40, target_source: "ratio" });
+  card._renderLiveStats();
+  assert.deepEqual(notes(card), ["", "", "target 40.0 g", ""], "ready: under the weight");
+  card._onLive({ type: "live_start", start_ts: 0, dose: 16, points: [], weight: 0, flow: 0, elapsed: 0, phase: "brewing", target: 40, target_source: "ratio" });
+  card._renderLiveStats();
+  assert.deepEqual(notes(card), ["", "", "target 40.0 g", ""], "live");
+  card._onLive({ type: "live_points", points: [], weight: 1, flow: 0, elapsed: 1, phase: "brewing", target: 41.6, target_source: "ratio" });
+  card._renderLiveStats();
+  assert.equal(notes(card)[2], "target 41.6 g", "follows a changed target");
+  card._hass = { language: "de" };
+  card._renderLiveStats();
+  assert.equal(notes(card)[2], "Ziel 41,6 g");
+  card._hass = null;
+  // Auto-stop off: no text, the line is still there (no height jump).
+  card._onLive({ type: "live_points", points: [], weight: 2, flow: 0, elapsed: 2, phase: "brewing", target: null, target_source: null });
+  card._renderLiveStats();
+  assert.deepEqual(notes(card), ["", "", "", ""]);
+  // Stored brews: with and without (brews before 0.5.0b3) a target.
+  assert.equal(card._targetText(38), "target 38.0 g");
+  assert.equal(card._targetText(null), "");
+  assert.equal(card._targetText(undefined), "");
+  // Replay ticks carry no target: the stored brew's one stays.
+  const replay = makeCard();
+  replay._setLive({ replay: true, source: [[0, 0, 0]], target: 38, points: [] });
+  replay._applyLiveValues({ weight: 0, flow: 0, elapsed: 0, phase: "brewing", stop: null });
+  replay._renderLiveStats();
+  assert.equal(notes(replay)[2], "target 38.0 g");
+  // Stored view: the yield stat gets the target note (render source).
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(path.join(here, "../custom_components/difluid_scale/www/difluid-brew-card.js"), "utf8")
+  );
+  assert.match(src, /stat\(this\._t\("yield"\)[^\n]*this\._targetText\(summary\.target\)/);
+  assert.match(src, /\.stat-note \{[^}]*min-height: 1\.3em/);
+  scenarios++;
+}
+
+// 10. Render check of the stored and the live view with the real render
+//     code (fake elements): stat lines are not the grey note banner; the
+//     stored ratio has two decimals; live stats unchanged.
+{
+  const cls = () => ({ toggle() {}, add() {}, remove() {} });
+  const el = () => ({ classList: cls(), setAttribute() {}, style: {}, textContent: "", innerHTML: "", title: "" });
+  const card = new Card();
+  card._built = true;
+  card._els = Object.fromEntries(
+    ["title", "badge", "badgeText", "note", "when", "detail", "nav", "prev", "replay",
+     "replayIcon", "next", "pos", "message", "stats", "legend"].map((k) => [k, el()])
+  );
+  card._chartBox = el();
+  card._renderChart = () => {};
+  card._renderLegend = () => {};
+  card._load = () => {};
+  card.setConfig({});
+  card._brews = [{
+    id: "b1", start: "2026-11-21T12:54:38+00:00", dose: 16.0, dose_source: "manual",
+    yield: 40.4, ratio: 2.52, duration: 28.2, target: 40.0, target_source: "ratio",
+  }];
+  card._index = 0;
+  card._render();
+  const html = card._els.stats.innerHTML;
+  const stats = [...html.matchAll(/class="value">([^<]*)(?:<span class="unit">([^<]*)<\/span>)?<\/div>\s*<div class="([^"]*)">([^<]*)</g)]
+    .map((m) => ({ value: m[1], line: m[3], note: m[4] }));
+  assert.deepEqual(stats.map((x) => x.value), ["16.0", "40.4", "1:2.52", "28.2"]);
+  assert.ok(stats.every((x) => x.line === "stat-note"), "stat lines are not the banner");
+  assert.ok(!/class="note"/.test(html), "no banner class inside the stats");
+  assert.deepEqual(stats.map((x) => x.note), ["corrected", "target 40.0 g", "", ""]);
+  // German: two decimals, comma.
+  card._hass = { language: "de" };
+  card._render();
+  assert.match(card._els.stats.innerHTML, /1:2,52/);
+  assert.match(card._els.stats.innerHTML, /Ziel 40,0 g/);
+  card._hass = null;
+  // An old brew without target: the line stays empty.
+  card._brews = [{ id: "b0", start: "2026-11-20T08:00:00+00:00", dose: 18, yield: 36, ratio: 2, duration: 27 }];
+  card._render();
+  assert.match(card._els.stats.innerHTML, /1:2\.00/);
+  assert.ok(!/target/.test(card._els.stats.innerHTML));
+  // Live view: time, flow, weight, dose (no ratio there), target line.
+  card._onLive({ type: "live_start", start_ts: 0, dose: 16, points: [], weight: 12.3, flow: 2.1, elapsed: 9, phase: "brewing", target: 40, target_source: "ratio" });
+  card._render();
+  const live = card._els.stats.innerHTML;
+  const liveValues = [...live.matchAll(/class="value">([^<]*)/g)].map((m) => m[1]);
+  assert.equal(liveValues.length, 4);
+  assert.deepEqual(liveValues.slice(1), ["2.1", "12.3", "16.0"], "flow, weight, dose");
+  assert.ok(!/class="note"/.test(live) && /class="stat-note">target 40\.0 g</.test(live));
+  // The banner rule stays for the real note, the stat line has its own
+  // rule without background or padding.
+  const css = await import("node:fs").then((fs) =>
+    fs.readFileSync(path.join(here, "../custom_components/difluid_scale/www/difluid-brew-card.js"), "utf8")
+  );
+  const rule = css.match(/\.stat-note \{([^}]*)\}/)[1];
+  assert.ok(!/background|padding|border-radius/.test(rule), rule);
+  assert.match(css, /\n\s*\.note \{[^}]*background/);
+  scenarios++;
+}
+
+// 11. Live time after an auto-stop cut: frozen at the cut while the
+//     weight goes on; without a cut it runs on as before.
+{
+  const card = makeCard();
+  card._onLive({ type: "live_start", start_ts: 0, dose: 16, points: [], weight: 30, flow: 2, elapsed: 20.5, phase: "brewing", stop: null, cut: null });
+  card._live.recvAt = performance.now() - 500;
+  assert.ok(card._liveElapsed() > 20.5, "runs on locally before the cut");
+  card._onLive({ type: "live_points", points: [], weight: 37.1, flow: 1.5, elapsed: 21.0, phase: "brewing", stop: null, cut: 21.0 });
+  card._live.recvAt = performance.now() - 900;
+  assert.equal(card._liveElapsed(), 21.0, "frozen at the cut");
+  card._onLive({ type: "live_points", points: [], weight: 38.4, flow: 0.2, elapsed: 21.0, phase: "tail", stop: 27.5, cut: 21.0 });
+  assert.equal(card._liveElapsed(), 21.0, "also in the tail (timer stop later)");
+  card._renderLiveStats();
+  const values = [...card._els.stats.innerHTML.matchAll(/class="value">([^<]*)/g)].map((m) => m[1]);
+  assert.equal(values[0], "21.0");
+  assert.equal(values[2], "38.4", "weighing goes on");
+  scenarios++;
+}
+
 console.log(`card flow: ${scenarios} scenarios OK`);

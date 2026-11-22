@@ -41,4 +41,17 @@ def test_card_flow_and_ready() -> None:
         text=True,
         timeout=60,
     )
-    assert "7 scenarios OK" in out.stdout
+    assert "11 scenarios OK" in out.stdout
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_card_expand_when_active() -> None:
+    """expand_when_active: active states, edit mode, mid-animation flips, clean-up."""
+    out = subprocess.run(
+        [NODE, str(HERE / "card_expand_test.mjs")],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert "16 scenarios OK" in out.stdout

@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 from homeassistant.util.ulid import ulid_now
 
-from .brew import BrewConfig, BrewResult, compute_ratio, correct_dose
+from .brew import BrewConfig, BrewResult, brew_metrics, compute_ratio, correct_dose
 from .const import (
     CONF_DOSE_LOOKBACK,
     CONF_DOSE_MAX,
@@ -27,6 +27,7 @@ from .const import (
     MAX_STORED_BREWS,
     SIGNAL_BREWS_UPDATED,
     STORAGE_KEY,
+    STORAGE_MINOR_VERSION,
     STORAGE_VERSION,
 )
 
@@ -50,6 +51,34 @@ def brew_config_from_options(options: dict[str, Any]) -> BrewConfig:
     )
 
 
+def _duration(result: BrewResult, cut_at: float | None) -> float:
+    """Brew time: to the auto-stop cut if it fired, else to the timer stop."""
+    if cut_at is None:
+        return result.duration
+    return round(min(result.duration, cut_at), 1)
+
+
+class BrewStore(Store[dict[str, Any]]):
+    """Brew history store with version migration.
+
+    1.1 -> 1.2 (0.5.0): brews get ``bean`` (None for older brews). Metrics
+    are computed on load from the profile (see ``BrewHistory.async_load``),
+    so they need no migration step.
+    """
+
+    async def _async_migrate_func(
+        self, old_major_version: int, old_minor_version: int, old_data: Any
+    ) -> dict[str, Any]:
+        if old_major_version != 1:
+            raise NotImplementedError
+        data = dict(old_data or {})
+        if old_minor_version < 2:
+            for brew in data.get("brews", []):
+                if isinstance(brew, dict):
+                    brew.setdefault("bean", None)
+        return data
+
+
 def brew_summary(brew: dict[str, Any]) -> dict[str, Any]:
     """A stored brew without its profile."""
     summary = {k: v for k, v in brew.items() if k not in ("profile", "counted_dose")}
@@ -70,8 +99,11 @@ class BrewHistory:
         self.hass = hass
         self.entry_id = entry_id
         self._device_id_fn = device_id_fn
-        self._store: Store[dict[str, Any]] = Store(
-            hass, STORAGE_VERSION, STORAGE_KEY.format(entry_id)
+        self._store = BrewStore(
+            hass,
+            STORAGE_VERSION,
+            STORAGE_KEY.format(entry_id),
+            minor_version=STORAGE_MINOR_VERSION,
         )
         self.brews: list[dict[str, Any]] = []  # oldest first
         self.brew_count = 0
@@ -86,10 +118,33 @@ class BrewHistory:
         data = await self._store.async_load()
         if not data:
             return
-        self.brews = list(data.get("brews", []))[-MAX_STORED_BREWS:]
+        self.brews = [
+            b for b in data.get("brews", []) if isinstance(b, dict) and "id" in b
+        ][-MAX_STORED_BREWS:]
+        bad: list[str] = []
         for brew in self.brews:
             # Stored before 0.3.0b2: what was added to the total so far.
             brew.setdefault("counted_dose", brew.get("dose") or 0.0)
+            # Stored before 0.5.0: no bean, no metrics (computed from the
+            # profile if there is one).
+            brew.setdefault("bean", None)
+            if "metrics" in brew:
+                continue
+            try:
+                metrics = brew_metrics(brew.get("profile") or [])
+            except (TypeError, ValueError, IndexError, ZeroDivisionError):
+                # A damaged profile never fails the setup: no metrics.
+                bad.append(str(brew["id"]))
+                continue
+            if metrics:
+                brew["metrics"] = metrics
+        if bad:
+            _LOGGER.warning(
+                "Metrics left out for %s stored brew(s) with an unreadable "
+                "profile: %s",
+                len(bad),
+                ", ".join(bad),
+            )
         self.brew_count = int(data.get("brew_count", len(self.brews)))
         self.coffee_total = float(data.get("coffee_total", 0.0))
         self._active = data.get("active")
@@ -162,28 +217,44 @@ class BrewHistory:
         return data
 
     @callback
-    def async_add_result(self, result: BrewResult) -> dict[str, Any]:
+    def async_add_result(
+        self,
+        result: BrewResult,
+        bean: str | None = None,
+        target: dict[str, Any] | None = None,
+        cut_at: float | None = None,
+    ) -> dict[str, Any]:
         """Store a finished brew, update totals, fire the bus event.
 
         A continued brew (``result.updated``, e.g. pour-over pause) replaces
         the stored brew with the same start: same id, brew count unchanged,
-        the coffee total only grows if the dose grew.
+        the coffee total only grows if the dose grew, the bean stays.
+        ``bean`` is the name of the active bean profile (None = none);
+        ``target`` the auto-stop target of the brew (``target`` g and
+        ``target_source``, None while the auto-stop is off); ``cut_at`` the
+        seconds to the auto-stop cut: the brew time ends there (pump off),
+        not at the timer stop after the drips.
         """
         start = datetime.fromtimestamp(result.start, UTC).isoformat()
         if result.updated and (old := self._find_start(start)) is not None:
-            return self._async_replace(old, result)
+            return self._async_replace(old, result, target, cut_at)
         brew = {
             "id": ulid_now(),
             "start": start,
-            "duration": result.duration,
+            "duration": _duration(result, cut_at),
             "dose": result.dose,
             "dose_source": DOSE_AUTO if result.dose is not None else None,
             "yield": result.yield_g,
             "ratio": result.ratio,
             # Most this brew ever added to coffee_total (dose corrections).
             "counted_dose": result.dose or 0.0,
+            "bean": bean,
+            "target": target["target"] if target else None,
+            "target_source": target["target_source"] if target else None,
             "profile": [list(p) for p in result.profile],
         }
+        if metrics := brew_metrics(brew["profile"]):
+            brew["metrics"] = metrics
         self.brews.append(brew)
         del self.brews[:-MAX_STORED_BREWS]
         self.brew_count += 1
@@ -197,11 +268,22 @@ class BrewHistory:
 
     @callback
     def _async_replace(
-        self, brew: dict[str, Any], result: BrewResult
+        self,
+        brew: dict[str, Any],
+        result: BrewResult,
+        target: dict[str, Any] | None = None,
+        cut_at: float | None = None,
     ) -> dict[str, Any]:
-        brew["duration"] = result.duration
+        brew["duration"] = _duration(result, cut_at)
         brew["yield"] = result.yield_g
         brew["profile"] = [list(p) for p in result.profile]
+        if target is not None:
+            brew["target"] = target["target"]
+            brew["target_source"] = target["target_source"]
+        if metrics := brew_metrics(brew["profile"]):
+            brew["metrics"] = metrics
+        else:
+            brew.pop("metrics", None)
         if brew.get("dose_source") != "manual" and result.dose is not None:
             counted = brew.get("counted_dose") or 0.0
             self.coffee_total += max(0.0, result.dose - counted)
@@ -235,6 +317,10 @@ class BrewHistory:
                 "yield": brew["yield"],
                 "ratio": brew["ratio"],
                 "duration": brew["duration"],
+                "bean": brew.get("bean"),
+                "target": brew.get("target"),
+                "target_source": brew.get("target_source"),
+                "metrics": brew.get("metrics"),
                 "updated": updated,
             },
         )

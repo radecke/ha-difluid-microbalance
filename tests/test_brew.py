@@ -1052,6 +1052,104 @@ def test_real_world_sequence_with_stop_button() -> None:
     assert 27.5 <= r.duration <= 28.5, r.duration
 
 
+def test_end_without_tail_after_auto_stop() -> None:
+    """Timer stopped by the auto-stop (drips already in): the brew ends at
+    the stop, not tail_seconds later; otherwise the tail as before."""
+    for mode in ("tail", "skip", "undo"):
+        skip = mode == "skip"
+        sim = Sim()
+        weigh_dose(sim, 18.0)
+        sim.state(True)
+        sim.timer_go()
+        sim.run(25, lambda r: min(36.0, max(0.0, round((r - 5) * 1.8, 1))))
+        if mode != "tail":
+            sim.tracker.end_without_tail()
+        if mode == "undo":
+            # Auto-stop could not stop the timer: a hand stop keeps the tail.
+            sim.tracker.keep_tail()
+        sim.timer_stop()
+        sim.state(False)
+        stop_t = sim.t
+        # The paused scale sends no weight: only ticks.
+        while not sim.results and sim.t < stop_t + 10:
+            sim.t = round(sim.t + 0.25, 3)
+            sim._collect(sim.tracker.tick(sim.t))
+        assert len(sim.results) == 1, sim.discards
+        waited = sim.t - stop_t
+        if skip:
+            assert waited <= 0.25, waited
+        else:
+            assert 3.0 <= waited <= 3.25, waited
+        assert 35.0 <= sim.results[0].yield_g <= 36.0, sim.results[0]
+    # Only for the active brew: the next one has its tail again.
+    assert sim.tracker._tail_override is None
+
+
+# ---------------------------------------------------------------- metrics
+
+def _live_brews() -> list[dict]:
+    import json
+
+    path = Path(__file__).resolve().parent / "fixtures/live_2026-11-21.json"
+    return json.loads(path.read_text())["brews_store"]["data"]["brews"]
+
+
+def test_metrics_from_live_profiles() -> None:
+    """Real profiles: vibration (0.5 g at 4 s) is no drop; first coffee from
+    ~2 g; flow from the monotone weight like the card."""
+    first, last = _live_brews()
+    # All five live brews (ids end FWEGTY ... RA64AV), checked 2026-11-21:
+    # first drop 12.3 / 7.0 / 6.0 / 2.9 / 8.8 s; the two in the fixture:
+    m = brew.brew_metrics(first["profile"])
+    assert m == {
+        "first_drop": 12.3, "peak_flow": 3.2, "mean_flow": 2.64, "flow_cv": 0.25,
+    }, m
+    m = brew.brew_metrics(last["profile"])
+    assert m["first_drop"] == 8.8 and m["peak_flow"] == 3.3, m
+    assert 2.5 <= m["mean_flow"] <= 3.0 and 0.1 <= m["flow_cv"] <= 0.3, m
+
+
+def test_metrics_synthetic_and_edge_cases() -> None:
+    # Constant 2 g/s from 6 s to 26 s, 0.4 g vibration before.
+    pts = []
+    for i in range(121):
+        t = i * 0.25
+        w = 0.4 if 2 <= t < 6 else 0.0
+        if t >= 6:
+            w = min(40.0, (t - 6) * 2.0)
+        pts.append([t, round(w, 1), 0.0])
+    m = brew.brew_metrics(pts)
+    assert m["first_drop"] == 6.8, m  # first point >= 1.5 g above the start
+    assert abs(m["peak_flow"] - 2.0) <= 0.1 and abs(m["mean_flow"] - 2.0) <= 0.05, m
+    assert m["flow_cv"] <= 0.05, m
+    # Vibration up to 1.0 g is no drop; nor is a jump at the very end that
+    # the profile does not show held for 1 s.
+    assert brew.first_drop_time([[t * 0.25, 1.0, 0] for t in range(20)]) is None
+    tail = [[t * 0.25, 0.0, 0] for t in range(20)] + [[5.0, 2.0, 0], [5.5, 2.1, 0]]
+    assert brew.first_drop_time(tail) is None
+    assert brew.first_drop_time([*tail, [6.1, 2.2, 0]]) == 5.0
+    # Baseline: median of the first second, at most 0 (cup tared a bit low).
+    low = [[t * 0.25, -0.8, 0] for t in range(8)] + [[2.0, 0.8, 0], [2.5, 0.9, 0], [3.5, 1.0, 0]]
+    assert brew.first_drop_time(low) == 2.0
+    # Container not tared (baseline 200 g): no first drop at all.
+    untared = [[t * 0.25, 200.0 + (2.0 if t > 20 else 0.0), 0] for t in range(40)]
+    assert brew.first_drop_time(untared) is None
+    # A single spike (cup bumped) is not a sustained drop.
+    spike = [[0.0, 0.0, 0], [1.0, 3.0, 0], [1.25, 0.0, 0], [2.5, 0.0, 0]]
+    assert brew.first_drop_time(spike) is None
+    # Nothing in the cup: no drop, no flow, no main phase.
+    flat = [[t * 0.25, 0.0, 0.0] for t in range(40)]
+    assert brew.brew_metrics(flat) == {
+        "first_drop": None, "peak_flow": None, "mean_flow": None, "flow_cv": None,
+    }
+    assert brew.brew_metrics([]) is None
+    # Same smoothing as the card (card_flow_test: slope 2 recovered).
+    ts = [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2]
+    f = brew.smoothed_flow(ts, [1 + 2 * t for t in ts], 1)
+    assert f[:3] == [0.0, 0.0, 0.0] and all(abs(v - 2) < 1e-9 for v in f[3:]), f
+    assert brew.monotone_weights([7.0, 3.8, 6.2, 7.3]) == [7.0, 7.0, 7.0, 7.3]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

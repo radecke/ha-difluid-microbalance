@@ -102,7 +102,6 @@ BUTTONS: tuple[DifluidButtonEntityDescription, ...] = (
 RESET_STOP_LEARNING = ButtonEntityDescription(
     key="reset_stop_learning",
     translation_key="reset_stop_learning",
-    icon="mdi:restore",
     entity_category=EntityCategory.CONFIG,
 )
 

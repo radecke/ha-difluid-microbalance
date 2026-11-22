@@ -46,7 +46,6 @@ SWITCHES: tuple[tuple[SwitchEntityDescription, int], ...] = (
 BREW_READY = SwitchEntityDescription(
     key="brew_ready",
     translation_key="brew_ready",
-    icon="mdi:coffee-outline",
 )
 
 

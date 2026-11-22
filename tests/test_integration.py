@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 from datetime import timedelta
+import statistics
 from typing import Any
 from unittest.mock import patch
 
@@ -22,6 +23,8 @@ from pytest_homeassistant_custom_component.common import (  # noqa: E402
     async_mock_service,
 )
 
+from conftest import Clock  # noqa: E402
+
 from custom_components.difluid_scale import coordinator as coord_mod  # noqa: E402
 from custom_components.difluid_scale.const import (  # noqa: E402
     CARD_URL,
@@ -36,6 +39,7 @@ from custom_components.difluid_scale.const import (  # noqa: E402
 from custom_components.difluid_scale.frontend import (  # noqa: E402
     _async_ensure_resource,
 )
+from custom_components.difluid_scale.stop_model import StopModel  # noqa: E402
 from custom_components.difluid_scale.protocol import (  # noqa: E402
     CMD_GET_STATUS,
     CMD_TIMER_STOP,
@@ -46,8 +50,7 @@ from custom_components.difluid_scale.protocol import (  # noqa: E402
     build_frame,
 )
 
-ADDR = "AA:BB:CC:DD:EE:FF"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 BREW_ENTITIES = (
     "sensor.microbalance_last_dose",
     "sensor.microbalance_last_yield",
@@ -65,16 +68,6 @@ OPTIONS = {
     "stability_seconds": 3,
     "dose_lookback_minutes": 30,
 }
-
-
-class Clock:
-    """Replaces ``time`` in the coordinator."""
-
-    def __init__(self) -> None:
-        self.t = 1_700_000_000.0
-
-    def time(self) -> float:
-        return self.t
 
 
 class FakeClient:
@@ -197,42 +190,6 @@ class Scale:
         self.timer_start = None
         self.frozen = None
         self.run(1, cut + 0.4)
-
-
-@pytest.fixture
-def clock() -> Generator[Clock]:
-    c = Clock()
-    with patch.object(coord_mod, "time", c):
-        yield c
-
-
-@pytest.fixture
-async def lovelace(hass: HomeAssistant) -> None:
-    assert await async_setup_component(hass, "lovelace", {})
-
-
-@pytest.fixture
-def entry(hass: HomeAssistant) -> MockConfigEntry:
-    hass.config.components.add("bluetooth_adapters")
-    hass.config.components.add("bluetooth")
-    e = MockConfigEntry(
-        domain=DOMAIN, data={"address": ADDR}, title="Microbalance", unique_id=ADDR
-    )
-    e.add_to_hass(hass)
-    return e
-
-
-@pytest.fixture
-def no_ble() -> Generator[None]:
-    with (
-        patch.object(
-            coord_mod.DifluidCoordinator, "async_start", lambda self: (lambda: None)
-        ),
-        patch.object(
-            coord_mod.DifluidCoordinator, "_clear_advertisement_history", lambda self: None
-        ),
-    ):
-        yield
 
 
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
@@ -743,7 +700,8 @@ async def test_live_mode_stream(
     assert idle["event"]["type"] == "live_idle"
     ready = await ws.receive_json()
     assert ready["event"] == {
-        "type": "live_ready", "ready": False, "dose": None, "entry_id": entry.entry_id
+        "type": "live_ready", "ready": False, "dose": None, "entry_id": entry.entry_id,
+        "target": None, "target_source": None,
     }
 
     coord = entry.runtime_data
@@ -975,13 +933,19 @@ async def test_brew_ready_websocket(
     await _switch(hass, False)  # unchanged: no message
     await _switch(hass, True)
     msg = (await ws.receive_json())["event"]
-    assert msg == {"type": "live_ready", "ready": True, "dose": None, "entry_id": entry.entry_id}
+    assert msg == {
+        "type": "live_ready", "ready": True, "dose": None, "entry_id": entry.entry_id,
+        "target": None, "target_source": None,  # auto-stop off
+    }
 
     # The dose of the next brew comes with it as soon as a plateau is known.
     scale = Scale(coord, clock)
     scale.weigh_dose(18.0)
     msg = (await ws.receive_json())["event"]
-    assert msg == {"type": "live_ready", "ready": True, "dose": 18.0, "entry_id": entry.entry_id}
+    assert msg == {
+        "type": "live_ready", "ready": True, "dose": 18.0, "entry_id": entry.entry_id,
+        "target": None, "target_source": None,
+    }
     await _switch(hass, False)
     assert (await ws.receive_json())["event"]["dose"] is None
     await _switch(hass, True)
@@ -1006,10 +970,24 @@ async def test_brew_ready_websocket(
 # ------------------------------------------------------------ config flow
 
 
+async def _options_step(hass: HomeAssistant, entry, step: str) -> dict:
+    """Open the options flow and pick ``step`` from the menu."""
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == "menu" and result["step_id"] == "init"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": step}
+    )
+    assert result["step_id"] == step, result
+    return result
+
+
 async def test_options_flow(hass: HomeAssistant, entry, no_ble, lovelace, clock) -> None:
     await _setup(hass, entry)
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert result["type"] == "form" and result["step_id"] == "init"
+    # No bean profiles yet: nothing to edit or delete.
+    assert result["menu_options"] == ["detection", "add_bean"]
+    result = await _options_step(hass, entry, "detection")
+    assert result["type"] == "form"
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {**OPTIONS, "dose_min": 26, "dose_max": 25}
     )
@@ -1075,7 +1053,9 @@ async def test_no_lovelace_does_not_crash(hass: HomeAssistant, caplog) -> None:
 
 # ------------------------------------------------------------ auto-stop
 
-PLUG = "switch.espresso_plug"
+# The stop switch: a smart plug (attributes like a live one, neutral name).
+PLUG = "switch.coffee_machine"
+PLUG_ATTRS = {"friendly_name": "Coffee machine"}
 TARGET = "number.microbalance_target_yield"
 STOP_SENSORS = (
     "sensor.microbalance_stop_latency",
@@ -1091,6 +1071,8 @@ async def _setup_autostop(
     options = dict(OPTIONS)
     if switch is not None:
         options["stop_switch"] = switch
+        # The plug is on while the machine is in use.
+        hass.states.async_set(switch, "on", PLUG_ATTRS)
     hass.config_entries.async_update_entry(entry, options=options)
     await _setup(hass, entry)
     calls = async_mock_service(hass, "switch", "turn_off")
@@ -1111,9 +1093,14 @@ async def _auto_shot(
     start_weight: float = 0.0,
     lift_after_cut: float | None = None,
     dose: float | None = 18.0,
+    late_drop: tuple[float, float] | None = None,
+    lift_after_settle: float | None = None,
+    glitch: tuple[float, float, int] | None = None,
 ) -> float | None:
     """A shot whose pump stops ``latency`` s after the auto-stop cut, then
     drips ``drip`` g. The scale answers the timer stop like the real one.
+    ``glitch`` = (weight, value, frames): once the weight reaches ``weight``
+    the scale sends ``value`` instead for that many frames (bad frames).
     Returns the cut time (None if never cut)."""
     coord = scale.coord
     clock = scale.clock
@@ -1121,8 +1108,13 @@ async def _auto_shot(
         scale.weigh_dose(dose)
 
     def _on_status() -> None:
-        scale.frozen = scale.timer()
-        scale.status(DeviceState.TIMER_PAUSE)
+        # Like the real scale: a status request is answered with the current
+        # state; paused once the stop (DLink press) went out.
+        if CMD_TIMER_STOP in scale.client.written:
+            scale.frozen = scale.timer()
+            scale.status(DeviceState.TIMER_PAUSE)
+        else:
+            scale.status(DeviceState.TIMING)
 
     scale.client.on_status = _on_status
     scale.status(DeviceState.TIMING)
@@ -1145,10 +1137,22 @@ async def _auto_shot(
             step = (drip - dripped) * 0.3
             dripped += step
             w += step
+        settled_t = coord.autostop._settled_t  # noqa: SLF001
+        if late_drop is not None and settled_t is not None and cut_t is not None:
+            # One late drop (grams) this long after the weight became calm.
+            delay, grams = late_drop
+            if clock.t >= settled_t + delay:
+                w += grams
+                late_drop = None
         if (
             lift_after_cut is not None
             and cut_t is not None
             and clock.t >= cut_t + lift_after_cut
+        ) or (
+            lift_after_settle is not None
+            and settled_t is not None
+            and cut_t is not None
+            and clock.t >= settled_t + lift_after_settle
         ):
             w = -300.0
         if scale.frozen is not None:
@@ -1157,6 +1161,10 @@ async def _auto_shot(
             scale.clock.t = round(scale.clock.t + 0.1, 3)
             scale._tick()  # noqa: SLF001
             await hass.async_block_till_done()
+            continue
+        if glitch is not None and w >= glitch[0] and glitch[2] > 0:
+            scale.run(0.1, glitch[1])
+            glitch = (glitch[0], glitch[1], glitch[2] - 1)
             continue
         scale.run(0.1, round(w, 1))
     await hass.async_block_till_done()
@@ -1196,9 +1204,10 @@ async def test_autostop_cuts_once_learns_and_persists(
     # The saved yield includes the drips (timer stopped only once settled).
     assert abs(brew["yield"] - last["final_yield"]) <= 0.1, (brew, last)
     assert brew["yield"] > last["cut_weight"] + 2.0, (brew, last)
-    # Duration runs past the cut until the weight settled (<= TIMER_STOP_MAX).
+    # The brew time ends at the cut (pump off), not at the timer stop after
+    # the drips (0.5.0b4).
     over = brew["duration"] - (cut_t - scale.shot_start)
-    assert 1.0 <= over <= 10.5, brew
+    assert -0.2 <= over <= 0.1, brew
     assert coord.autostop.model.count == 1
     assert _state(hass, "sensor.microbalance_stop_learning_samples") == "1"
     # Prior phase: tau learned, c stays at its prior.
@@ -1261,7 +1270,7 @@ async def test_autostop_option_applies_live(
 ) -> None:
     """Choosing the switch in the options flow arms it without a reload."""
     calls = await _setup_autostop(hass, entry, None, 38.0)
-    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _options_step(hass, entry, "detection")
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {**OPTIONS, "stop_switch": PLUG}
     )
@@ -1273,13 +1282,129 @@ async def test_autostop_option_applies_live(
     assert await _auto_shot(hass, scale) is not None
     assert len(calls) == 1
     # Cleared again: off.
-    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await _options_step(hass, entry, "detection")
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], dict(OPTIONS)
     )
     await hass.async_block_till_done()
     assert "stop_switch" not in entry.options
     assert coord.autostop.switch_entity is None and not coord.autostop.enabled
+
+
+# ---------------------------------------------- 0.5.0b6 bad weight frames
+
+
+def _model_0752(coord) -> None:
+    """The learned model before the brew 2026-11-22 07:52."""
+    coord.autostop.model = StopModel.from_dict(
+        {"tau": 0.51, "c": 0.071, "p": [[0.05, 0.0], [0.0, 0.3]], "count": 6}
+    )
+
+
+async def test_autostop_single_bad_frame_does_not_cut(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """2026-11-22 07:52: one -197.4 g frame at 12.8 g made 0.5.0b5 read
+    229.85 g/s and cut at 15.8 g (target 41.3 g). Now it is dropped: the
+    cut comes at the target and the shot is learned normally."""
+    calls = await _setup_autostop(hass, entry, PLUG, 41.3)
+    coord = entry.runtime_data
+    _model_0752(coord)
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    assert await _auto_shot(hass, scale, glitch=(12.8, -197.4, 1)) is not None
+    assert len(calls) == 1
+    last = coord.autostop.last
+    assert last["cut_weight"] > 39.0, last
+    assert 1.5 < last["cut_flow"] < 2.5, last
+    assert last["accepted"] and last["reason"] is None, last
+    assert coord.autostop.model.count == 7
+
+
+@pytest.mark.parametrize(
+    ("glitch", "learned"),
+    [
+        # Two bad frames in a row, long before the cut.
+        ((12.8, -197.4, 2), True),
+        # One bad frame upwards (+200 g), 1.5 s before the cut.
+        ((36.0, 236.0, 1), True),
+        # One bad frame 0.5 s before the cut ("end of the flow window").
+        ((38.0, -197.4, 1), True),
+    ],
+)
+async def test_autostop_bad_frames_never_drive_the_cut(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock, glitch, learned
+) -> None:
+    """Bad frames never cut early. A dropped frame is left out of the flow
+    estimate, so the shot is still learned (since 0.5.0b7)."""
+    calls = await _setup_autostop(hass, entry, PLUG, 41.3)
+    coord = entry.runtime_data
+    _model_0752(coord)
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    assert await _auto_shot(hass, scale, glitch=glitch) is not None
+    assert len(calls) == 1
+    last = coord.autostop.last
+    assert last["cut_weight"] > 39.0 and 1.5 < last["cut_flow"] < 2.5, last
+    assert last["final_yield"] is not None, last
+    if learned:
+        assert last["accepted"] and coord.autostop.model.count == 7, last
+    else:
+        assert not last["accepted"] and last["reason"] == "outlier", last
+        assert coord.autostop.model.count == 6
+
+
+async def test_autostop_single_spike_up_does_not_cut(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """One frame +6 g above the line (inside the frame filter) does not cut
+    on its own: the cut comes at the normal weight."""
+    calls = await _setup_autostop(hass, entry, PLUG, 41.3)
+    coord = entry.runtime_data
+    _model_0752(coord)
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    # At 36 g the scale sends 40.7 once: 40.7 + 1.1 + lead would cut.
+    assert await _auto_shot(hass, scale, glitch=(36.0, 40.7, 1)) is not None
+    last = coord.autostop.last
+    assert last["cut_weight"] != 40.7 and 39.5 < last["cut_weight"] < 40.5, last
+    assert len(calls) == 1
+
+
+async def test_autostop_single_bad_frame_after_cut_is_no_lift(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """A single negative frame while it still drips is not a lifted cup
+    (one frame); the drips are weighed and the shot is learned."""
+    calls = await _setup_autostop(hass, entry, PLUG, 38.0)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    # Prior model: cut at ~35.6 g, the pump stops 1.2 s later (~38 g).
+    assert await _auto_shot(hass, scale, glitch=(37.0, -197.4, 1)) is not None
+    last = coord.autostop.last
+    assert last["cut_weight"] < 37.0, last
+    assert last["accepted"] and last["reason"] is None, last
+    assert last["final_yield"] > 38.0, last
+
+
+async def test_autostop_implausible_flow_backstop(
+    hass: HomeAssistant, entry, no_ble, lovelace, clock
+) -> None:
+    """A flow above FLOW_MAX never drives the cut (only weight + c does) and
+    the shot is not learned."""
+    calls = await _setup_autostop(hass, entry, PLUG, 38.0)
+    coord = entry.runtime_data
+    scale = Scale(coord, clock)
+    scale.calls = calls
+    # 10 g/s (1 g per 0.1 s frame: passes the frame filter).
+    assert await _auto_shot(hass, scale, flow=10.0, seconds=20) is not None
+    last = coord.autostop.last
+    assert last["cut_flow"] > 8.0, last
+    assert last["cut_weight"] >= 38.0 - 0.3 - 0.1, last  # weight + c, no flow
+    assert last["predicted_overshoot"] == 0.3, last
+    assert not last["accepted"] and last["reason"] == "outlier", last
+    assert coord.autostop.model.count == 0
 
 
 async def test_autostop_cup_lifted_is_not_learned(
@@ -1334,6 +1459,30 @@ REAL_BREW = {
         [31.0, 38.6, 0.0],
     ],
 }
+# Brew 2026-11-22 07:52 around its cut (17.30 s), then (for the test only)
+# a part rising 3 g per 0.25 s (12 g/s).
+GLITCH_BREW = {
+    "id": "01GLITCH",
+    "start": "2026-11-22T06:51:50.196000+00:00",
+    "duration": 17.3,
+    "dose": 15.9,
+    "dose_source": "auto",
+    "yield": 18.3,
+    "ratio": 1.15,
+    "counted_dose": 15.9,
+    "profile": [
+        [t, w, 0.0]
+        for t, w in (
+            (14.33, 9.2), (14.57, 9.7), (14.85, 9.7), (15.25, 10.4),
+            (15.46, 10.2), (15.76, 12.2), (16.07, 12.8), (16.37, -197.4),
+            (16.63, 14.9), (17.0, 15.0), (17.3, 15.8), (17.61, 15.7),
+            (17.81, 17.3), (18.04, 18.0), (19.0, 18.3),
+            *((25.0 + i * 0.25, 18.3 + 3.0 * i) for i in range(21)),
+        )
+    ],
+}
+# The points of REAL_BREW within 2 s before its cut (27.75 s).
+_PTS = [(26.83, 33.7), (27.14, 34.8), (27.44, 34.4), (27.75, 36.8)]
 OTHER_BREW = {
     "id": "01OTHER",
     "start": "2026-11-21T07:10:00+00:00",
@@ -1404,7 +1553,8 @@ async def test_delete_brew_service(
 async def test_learn_stop_from_brew_service(
     hass: HomeAssistant, hass_storage: dict[str, Any], entry, no_ble, lovelace, clock
 ) -> None:
-    _store_brews(hass_storage, entry)
+    key = _store_brews(hass_storage, entry)
+    hass_storage[key]["data"]["brews"].append(dict(GLITCH_BREW))
     await _setup(hass, entry)
     coord = entry.runtime_data
     response = await hass.services.async_call(
@@ -1412,10 +1562,17 @@ async def test_learn_stop_from_brew_service(
         {"brew_id": "01REAL", "cut_offset": 27.83, "target": 38.0},
         blocking=True, return_response=True,
     )
-    flow = (36.8 - 33.7) / (27.75 - 26.83)  # same 1 s secant as the live cut
+    # Same Theil-Sen flow as the live cut (median of the pairwise slopes
+    # of the points within 2 s before the cut).
+    flow = statistics.median(
+        (w2 - w1) / (t2 - t1)
+        for i, (t1, w1) in enumerate(_PTS)
+        for t2, w2 in _PTS[i + 1 :]
+    )
     assert response["cut_point_t"] == 27.75
     assert response["weight_at_cut"] == 36.8
     assert abs(response["flow_at_cut"] - round(flow, 3)) < 1e-9
+    assert response["clean_cut"] is True
     assert response["final_yield"] == 38.6 and response["overshoot"] == 1.8
     assert response["deviation"] == 0.6 and response["accepted"] is True
     assert response["predicted_overshoot_before"] == round(0.3 + 1.0 * flow, 2)
@@ -1435,6 +1592,26 @@ async def test_learn_stop_from_brew_service(
     assert response["overshoot"] == 10.6 and response["deviation"] is None
     assert coord.autostop.model.count == 1
 
+    # The brew 2026-11-22 07:52 (one -197.4 g frame 0.93 s before the cut):
+    # the frame is left out, the flow is plausible: learned (since 0.5.0b7).
+    response = await hass.services.async_call(
+        DOMAIN, "learn_stop_from_brew",
+        {"brew_id": "01GLITCH", "cut_offset": 17.36},
+        blocking=True, return_response=True,
+    )
+    assert response["weight_at_cut"] == 15.8 and response["clean_cut"] is True
+    assert 1.0 < response["flow_at_cut"] < 3.5
+    assert response["accepted"] is True and response["reason"] is None
+    # Too fast to be a shot (12 g/s): the flow is implausible.
+    response = await hass.services.async_call(
+        DOMAIN, "learn_stop_from_brew",
+        {"brew_id": "01GLITCH", "cut_offset": 30.0},
+        blocking=True, return_response=True,
+    )
+    assert response["flow_at_cut"] > 8.0 and response["clean_cut"] is True
+    assert response["accepted"] is False and response["reason"] == "outlier"
+    assert coord.autostop.model.count == 2
+
     for data in (
         {"brew_id": "01NOPE", "cut_offset": 27.0},
         {"brew_id": "01REAL", "cut_offset": 1.0},  # before the first point
@@ -1449,7 +1626,7 @@ async def test_learn_stop_from_brew_service(
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
     key = STOP_STORAGE_KEY.format(entry.entry_id)
-    assert hass_storage[key]["data"]["model"]["count"] == 1
+    assert hass_storage[key]["data"]["model"]["count"] == 2
 
 
 RATIO = "number.microbalance_target_ratio"

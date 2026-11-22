@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -38,6 +39,8 @@ from .const import (
     CONNECT_RETRY_DELAY,
     DOMAIN,
     READY_TIMEOUT_SECONDS,
+    SETUP_COMMAND_GAP,
+    SETUP_DELAY,
     SIGNAL_LIVE,
     STATUS_POLL_INTERVAL,
 )
@@ -74,6 +77,8 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 INFO_TIMEOUT = 2.0  # seconds per device-info request (best effort)
+# A failing frame consumer logs its stack trace at most this often.
+ERROR_LOG_INTERVAL = 60.0  # seconds
 
 # Settings read on every connect (Func 1 get requests).
 READ_SETTINGS = (
@@ -108,6 +113,11 @@ type KeyEventListener = Callable[[str], None]
 type ReadyListener = Callable[[], None]
 
 type DifluidConfigEntry = ConfigEntry[DifluidCoordinator]
+
+
+# Diagnostics (0.5.0): log raw bytes when the raw weight jumps this much
+# (x10 g, i.e. 50 g); hunting a recurring single -197.5 g frame.
+WEIGHT_JUMP_LOG_RAW = 500
 
 
 @dataclass(frozen=True)
@@ -146,6 +156,8 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._client: BleakClientWithServiceCache | None = None
         self._connect_lock = asyncio.Lock()
         self._buffer = FrameBuffer()
+        # Diagnostics (0.5.0): last raw notifications, logged on a weight jump.
+        self._recent_payloads: deque[bytes] = deque(maxlen=6)
         self._cancel_poll: CALLBACK_TYPE | None = None
         self._unloading = False
         self._status_event = asyncio.Event()
@@ -161,10 +173,26 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         # "Prepare brew" switch: integration state, independent of the scale.
         self.brew_ready = False
         self._ready_dose: float | None = None
+        self._ready_target: dict | None = None
         self._cancel_ready_timeout: CALLBACK_TYPE | None = None
         self._ready_listeners: list[ReadyListener] = []
         # Adaptive stop at the target yield.
         self.autostop = AutoStop(hass, self, entry.entry_id)
+        # The ready view shows the target: follow target and option changes.
+        self.autostop.async_add_listener(self._refresh_ready_dose)
+        # Data decoded from the notification being handled.
+        self._sensor: SensorData | None = None
+        self._status: StatusData | None = None
+        self._settings: dict[int, int] = {}
+        self._changed = False
+        # Throttled error logging per handler (_guarded).
+        self._error_logged: dict[str, float] = {}
+        self._error_repeats: dict[str, int] = {}
+
+    @property
+    def unloading(self) -> bool:
+        """True once this instance is shutting down (unload, HA stop)."""
+        return self._unloading
 
     @property
     def connected(self) -> bool:
@@ -241,6 +269,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._stop_poll()
         self._stop_brew_tick()
         self._stop_ready_timeout()
+        self.autostop.async_stop_watching()
         self.brews.set_active(self.brew_tracker.export_active(time.time()))
         if self._live is not None:
             self._live = None
@@ -364,13 +393,47 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             except (BleakError, TimeoutError) as err:
                 _LOGGER.debug("%s: connect failed: %s", self.address, err)
                 return False
+            if self._unloading:
+                # Unloaded while connecting: nothing of this instance may
+                # keep the link or start polling.
+                await self._async_drop_client(client)
+                return True
 
             self._client = client
             self._buffer.clear()
             try:
-                await client.start_notify(CHAR_UUID, self._on_notification)
-                await client.write_gatt_char(CHAR_UUID, CMD_GET_STATUS, response=True)
-                await client.write_gatt_char(CHAR_UUID, CMD_AUTO_SEND_ON, response=True)
+                for pause, step in (
+                    (
+                        SETUP_DELAY,
+                        lambda: client.start_notify(
+                            CHAR_UUID, self._on_notification
+                        ),
+                    ),
+                    (
+                        SETUP_COMMAND_GAP,
+                        lambda: client.write_gatt_char(
+                            CHAR_UUID, CMD_GET_STATUS, response=True
+                        ),
+                    ),
+                    (
+                        SETUP_COMMAND_GAP,
+                        lambda: client.write_gatt_char(
+                            CHAR_UUID, CMD_AUTO_SEND_ON, response=True
+                        ),
+                    ),
+                ):
+                    await asyncio.sleep(pause)
+                    if self._unloading:
+                        if self._client is client:
+                            self._client = None
+                        await self._async_drop_client(client)
+                        return True
+                    await step()
+                    if self._unloading:
+                        if self._client is client:
+                            self._client = None
+                        await self._async_drop_client(client)
+                        return True
             except (BleakError, TimeoutError) as err:
                 _LOGGER.debug("%s: setup after connect failed: %s", self.address, err)
                 self._client = None
@@ -390,6 +453,14 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 f"{DOMAIN}_init_{self.address}",
             )
             return True
+
+    async def _async_drop_client(self, client: BleakClientWithServiceCache) -> None:
+        """Disconnect a client this instance no longer uses (unloading)."""
+        _LOGGER.debug("%s: unloaded while connecting, disconnecting", self.address)
+        try:
+            await client.disconnect()
+        except BleakError as err:
+            _LOGGER.debug("%s: error during disconnect: %s", self.address, err)
 
     async def _async_after_connect(self) -> None:
         """Read settings and device info; best effort, never fatal."""
@@ -505,73 +576,147 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
     # ------------------------------------------------------------- data in/out
 
     def _on_notification(self, _char: object, payload: bytearray) -> None:
-        """Handle a notification; one packet may hold several frames."""
+        """Handle a notification; one packet may hold several frames.
+
+        Every frame and every consumer (brew tracker, auto-stop, entities,
+        key listeners) is guarded on its own: an error in one is logged and
+        does not drop the rest of the packet.
+        """
         if self._unloading:
             return
-        changed = False
-        sensor = self.data.sensor
-        status = self.data.status
-        settings = self.data.settings
+        self._sensor = self.data.sensor
+        self._status = self.data.status
+        self._settings = self.data.settings
+        self._changed = False
         events: list[str] = []
-        for frame in self._buffer.feed(bytes(payload)):
-            if (new_sensor := parse_sensor(frame)) is not None:
-                if sensor is None or (
-                    new_sensor.weight_raw,
-                    new_sensor.flow_raw,
-                    new_sensor.timer_raw,
-                    new_sensor.unit,
-                ) != (sensor.weight_raw, sensor.flow_raw, sensor.timer_raw, sensor.unit):
-                    changed = True
-                sensor = new_sensor
-                if (grams := new_sensor.weight_grams) is not None:
-                    now = time.time()
-                    self._handle_brew_result(
-                        self.brew_tracker.feed_sample(
-                            now, grams, new_sensor.flow_rate, new_sensor.timer
-                        )
-                    )
-                    # After the tracker (brew state is current), before the
-                    # rest of the frame: the cut goes out without delay.
-                    self.autostop.feed_sample(now, grams)
-                    self._refresh_ready_dose()
-                if settings.get(CMD_SETTINGS_WEIGHT_UNIT) != new_sensor.unit:
-                    settings = {**settings, CMD_SETTINGS_WEIGHT_UNIT: new_sensor.unit}
-                    changed = True
-            elif (new_status := parse_status(frame)) is not None:
-                if status is None or new_status.raw != status.raw:
-                    changed = True
-                status = new_status
-                self._status_event.set()
-                self._feed_brew_state(new_status.state)
-            elif (setting := parse_setting(frame)) is not None:
-                cmd, value = setting
-                if settings.get(cmd) != value:
-                    settings = {**settings, cmd: value}
-                    changed = True
-            elif is_key_frame(frame):
-                # App command echoes yield None and are ignored.
-                if (event := parse_key_event(frame)) is not None:
-                    events.append(event)
-            elif frame.func == FUNC_INFO:
-                self._handle_info_frame(frame)
-            else:
-                _LOGGER.debug(
-                    "%s: unknown frame func=%s cmd=%s data=%s",
-                    self.address,
-                    frame.func,
-                    frame.cmd,
-                    frame.data.hex(),
-                )
-        new_data = DifluidData(sensor=sensor, status=status, settings=settings)
-        if changed:
-            self.async_set_updated_data(new_data)
+        self._recent_payloads.append(bytes(payload))
+        try:
+            frames = self._buffer.feed(bytes(payload))
+        except Exception:
+            _LOGGER.exception("%s: could not split notification", self.address)
+            self._buffer.clear()
+            return
+        for frame in frames:
+            self._guarded(
+                f"frame func={frame.func} cmd={frame.cmd}",
+                self._handle_frame,
+                frame,
+                events,
+            )
+        new_data = DifluidData(
+            sensor=self._sensor, status=self._status, settings=self._settings
+        )
+        if self._changed:
+            self._guarded("updating entities", self.async_set_updated_data, new_data)
         else:
             # Keep the tick (not exposed) current without writing state.
             self.data = new_data
         for event in events:
             _LOGGER.debug("%s: key event %s", self.address, event)
             for listener in list(self._key_listeners):
-                listener(event)
+                self._guarded("key listener", listener, event)
+
+    def _guarded(self, what: str, func: Callable[..., object], *args: object) -> None:
+        """Call ``func``; log (not raise) an error.
+
+        Throttled per handler: the full stack trace at most once per
+        ERROR_LOG_INTERVAL, repeats in between only as a debug line with a
+        count (a failing handler would otherwise log 10 times a second).
+        """
+        try:
+            func(*args)
+        except Exception:
+            now = monotonic_time_coarse()
+            last = self._error_logged.get(what)
+            if last is None or now - last >= ERROR_LOG_INTERVAL:
+                repeats = self._error_repeats.pop(what, 0)
+                self._error_logged[what] = now
+                _LOGGER.exception(
+                    "%s: error in %s (%s more since the last report)",
+                    self.address,
+                    what,
+                    repeats,
+                )
+            else:
+                self._error_repeats[what] = self._error_repeats.get(what, 0) + 1
+                _LOGGER.debug(
+                    "%s: error in %s again (%s since the last report)",
+                    self.address,
+                    what,
+                    self._error_repeats[what],
+                    exc_info=True,
+                )
+
+    def _handle_frame(self, frame: Frame, events: list[str]) -> None:
+        """Decode one frame into the pending data of this notification."""
+        if (new_sensor := parse_sensor(frame)) is not None:
+            sensor = self._sensor
+            if (
+                sensor is not None
+                and abs(new_sensor.weight_raw - sensor.weight_raw) >= WEIGHT_JUMP_LOG_RAW
+            ):
+                _LOGGER.warning(
+                    "%s: weight jump %s -> %s (raw), frame data %s, "
+                    "recent notifications %s",
+                    self.address,
+                    sensor.weight_raw,
+                    new_sensor.weight_raw,
+                    frame.data.hex(),
+                    [p.hex() for p in self._recent_payloads],
+                )
+            if sensor is None or (
+                new_sensor.weight_raw,
+                new_sensor.flow_raw,
+                new_sensor.timer_raw,
+                new_sensor.unit,
+            ) != (sensor.weight_raw, sensor.flow_raw, sensor.timer_raw, sensor.unit):
+                self._changed = True
+            self._sensor = new_sensor
+            if self._settings.get(CMD_SETTINGS_WEIGHT_UNIT) != new_sensor.unit:
+                self._settings = {
+                    **self._settings,
+                    CMD_SETTINGS_WEIGHT_UNIT: new_sensor.unit,
+                }
+                self._changed = True
+            if (grams := new_sensor.weight_grams) is not None:
+                now = time.time()
+                self._guarded(
+                    "brew tracker",
+                    lambda: self._handle_brew_result(
+                        self.brew_tracker.feed_sample(
+                            now, grams, new_sensor.flow_rate, new_sensor.timer
+                        )
+                    ),
+                )
+                # After the tracker (brew state is current), before the
+                # rest of the frame: the cut goes out without delay.
+                self._guarded("auto-stop", self.autostop.feed_sample, now, grams)
+                self._guarded("ready dose", self._refresh_ready_dose)
+        elif (new_status := parse_status(frame)) is not None:
+            if self._status is None or new_status.raw != self._status.raw:
+                self._changed = True
+            self._status = new_status
+            self._status_event.set()
+            self._guarded("brew tracker", self._feed_brew_state, new_status.state)
+        elif (setting := parse_setting(frame)) is not None:
+            cmd, value = setting
+            if self._settings.get(cmd) != value:
+                self._settings = {**self._settings, cmd: value}
+                self._changed = True
+        elif is_key_frame(frame):
+            # App command echoes yield None and are ignored.
+            if (event := parse_key_event(frame)) is not None:
+                events.append(event)
+        elif frame.func == FUNC_INFO:
+            self._handle_info_frame(frame)
+        else:
+            _LOGGER.debug(
+                "%s: unknown frame func=%s cmd=%s data=%s",
+                self.address,
+                frame.func,
+                frame.cmd,
+                frame.data.hex(),
+            )
 
     # ---------------------------------------------------------------- brews
 
@@ -604,7 +749,12 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         tracker = self.brew_tracker
         self.autostop.brew_finished(result, tracker.last_discard_reason is not None)
         if result is not None:
-            brew = self.brews.async_add_result(result)
+            brew = self.brews.async_add_result(
+                result,
+                bean=self.autostop.brew_bean(result.start),
+                target=self.autostop.brew_target(result.start, result.dose),
+                cut_at=self.autostop.cut_offset(result.start),
+            )
             self._end_live(end_message(brew=brew_summary(brew)))
         elif tracker.last_discard_reason:
             _LOGGER.debug(
@@ -619,7 +769,11 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             tracker.last_discard_reason = None
             tracker.last_discard_code = None
         if tracker.active and self._live is None:
-            self._live = LiveBrew(tracker)
+            # Brew start: its bean is fixed now (stored brew, auto-stop).
+            self.autostop.brew_bean(tracker.start)
+            self._live = LiveBrew(
+                tracker, self.autostop.brew_target, self.autostop.cut_offset
+            )
             # A running brew suspends the backstop; only its end turns the
             # "Prepare brew" switch off.
             self._stop_ready_timeout()
@@ -693,7 +847,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self.brew_ready = ready
         _LOGGER.debug("%s: brew ready %s", self.address, ready)
         self._ready_dose = self.ready_dose() if ready else None
-        self._send_live(ready_message(ready, self._ready_dose))
+        self._ready_target = (
+            self.autostop.target_for_dose(self._ready_dose) if ready else None
+        )
+        self._send_live(ready_message(ready, self._ready_dose, self._ready_target))
         for listener in list(self._ready_listeners):
             listener()
 
@@ -703,17 +860,23 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
 
     def ready_snapshot(self) -> dict:
         """``live_ready`` for a new subscriber."""
-        return ready_message(self.brew_ready, self.ready_dose() if self.brew_ready else None)
+        dose = self.ready_dose() if self.brew_ready else None
+        return ready_message(
+            self.brew_ready, dose, self.autostop.target_for_dose(dose)
+        )
 
     @callback
     def _refresh_ready_dose(self) -> None:
-        """Resend ``live_ready`` when the dose for the next brew changes."""
-        if not self.brew_ready or self._live is not None:
+        """Resend ``live_ready`` when the dose for the next brew or its
+        auto-stop target changes (weight samples, target/option changes)."""
+        if self._unloading or not self.brew_ready or self._live is not None:
             return
         dose = self.ready_dose()
-        if dose != self._ready_dose:
+        target = self.autostop.target_for_dose(dose)
+        if dose != self._ready_dose or target != self._ready_target:
             self._ready_dose = dose
-            self._send_live(ready_message(True, dose))
+            self._ready_target = target
+            self._send_live(ready_message(True, dose, target))
 
     @callback
     def _async_ready_timeout(self, _now: datetime) -> None:

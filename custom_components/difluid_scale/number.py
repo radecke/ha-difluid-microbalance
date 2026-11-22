@@ -7,7 +7,6 @@ from homeassistant.components.number import (
     NumberEntity,
     NumberEntityDescription,
     NumberMode,
-    RestoreNumber,
 )
 from homeassistant.const import UnitOfMass
 from homeassistant.core import HomeAssistant
@@ -34,7 +33,6 @@ DOSE_CORRECTION = NumberEntityDescription(
 TARGET_YIELD = NumberEntityDescription(
     key="target_yield",
     translation_key="target_yield",
-    icon="mdi:target",
     device_class=NumberDeviceClass.WEIGHT,
     native_unit_of_measurement=UnitOfMass.GRAMS,
     native_min_value=0.0,
@@ -46,7 +44,6 @@ TARGET_YIELD = NumberEntityDescription(
 TARGET_RATIO = NumberEntityDescription(
     key="target_ratio",
     translation_key="target_ratio",
-    icon="mdi:scale-balance",
     native_min_value=0.0,
     native_max_value=5.0,
     native_step=0.1,
@@ -89,15 +86,11 @@ class DifluidDoseNumber(DifluidBrewEntity, NumberEntity):
             ) from err
 
 
-class DifluidTargetYieldNumber(DifluidStopEntity, RestoreNumber):
-    """Settled yield to stop the brew at (0 = auto-stop off); restored."""
+class DifluidTargetYieldNumber(DifluidStopEntity, NumberEntity):
+    """Settled yield to stop the brew at (0 = auto-stop off).
 
-    async def async_added_to_hass(self) -> None:
-        """Restore the last target."""
-        await super().async_added_to_hass()
-        data = await self.async_get_last_number_data()
-        if data is not None and data.native_value is not None:
-            self.coordinator.autostop.set_target(data.native_value)
+    The value is integration state (stored with the stop model), so the
+    auto-stop keeps its target while this entity is disabled."""
 
     @property
     def native_value(self) -> float:
@@ -107,21 +100,14 @@ class DifluidTargetYieldNumber(DifluidStopEntity, RestoreNumber):
     async def async_set_native_value(self, value: float) -> None:
         """Set a new target (takes effect on the next sample)."""
         self.coordinator.autostop.set_target(value)
-        self.async_write_ha_state()
 
 
-class DifluidTargetRatioNumber(DifluidStopEntity, RestoreNumber):
-    """Target brew ratio (yield / dose, 0 = off); restored.
+class DifluidTargetRatioNumber(DifluidStopEntity, NumberEntity):
+    """Target brew ratio (yield / dose, 0 = off); integration state.
 
     With a dose detected for the running brew the auto-stop aims at
-    ratio x dose; without one it falls back to the target yield."""
-
-    async def async_added_to_hass(self) -> None:
-        """Restore the last ratio."""
-        await super().async_added_to_hass()
-        data = await self.async_get_last_number_data()
-        if data is not None and data.native_value is not None:
-            self.coordinator.autostop.set_ratio(data.native_value)
+    ratio x dose; without one it falls back to the target yield. With a
+    bean active, a new ratio is written back to the bean's profile."""
 
     @property
     def native_value(self) -> float:
@@ -131,4 +117,3 @@ class DifluidTargetRatioNumber(DifluidStopEntity, RestoreNumber):
     async def async_set_native_value(self, value: float) -> None:
         """Set a new ratio (takes effect on the next sample)."""
         self.coordinator.autostop.set_ratio(value)
-        self.async_write_ha_state()

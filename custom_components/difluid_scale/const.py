@@ -28,6 +28,14 @@ ADVERTISEMENT_MAX_AGE: Final = 10  # seconds
 CONNECT_RETRIES: Final = 3
 CONNECT_RETRY_DELAY: Final = 1  # seconds
 
+# Pause after the link is up before subscribing, and between the setup writes.
+# Right after power-on the scale sometimes refuses the notification subscription
+# ("Insufficient authorization") and drops the link ~8 s later; a second attempt
+# succeeds. Other implementations wait before subscribing (de1app/Decenza 100 ms,
+# DiFluid's demo ~3 s) and space commands (Beanconqueror users: 300 ms).
+SETUP_DELAY: Final = 1.0  # seconds
+SETUP_COMMAND_GAP: Final = 0.3  # seconds
+
 # Brew detection options (keys in config entry options) and defaults.
 CONF_TAIL_SECONDS: Final = "tail_seconds"
 CONF_MIN_DURATION: Final = "min_duration"
@@ -40,6 +48,9 @@ CONF_DOSE_LOOKBACK: Final = "dose_lookback_minutes"
 # Adaptive stop: switch turned off when the target yield is reached (none =
 # feature off). Not a brew threshold, so not in DEFAULT_OPTIONS.
 CONF_STOP_SWITCH: Final = "stop_switch"
+# Bean profiles (options flow): list of {id, name, ratio, note}.
+CONF_BEANS: Final = "beans"
+BEAN_NONE: Final = "none"  # select option: no active bean
 
 DEFAULT_OPTIONS: Final[dict[str, float]] = {
     CONF_TAIL_SECONDS: 3.0,
@@ -53,14 +64,21 @@ DEFAULT_OPTIONS: Final[dict[str, float]] = {
 }
 
 EVENT_BREW_COMPLETED: Final = f"{DOMAIN}_brew_completed"
+# Repair issue: the configured stop switch is missing or unavailable.
+ISSUE_STOP_SWITCH: Final = "stop_switch_unavailable"
 SIGNAL_BREWS_UPDATED: Final = f"{DOMAIN}_brews_updated_{{}}"  # .format(entry_id)
 SIGNAL_LIVE: Final = f"{DOMAIN}_live_{{}}"  # .format(entry_id)
 
 STORAGE_VERSION: Final = 1
+# 1.2 (0.5.0): brews carry ``bean`` and ``metrics``.
+STORAGE_MINOR_VERSION: Final = 2
 STORAGE_KEY: Final = f"{DOMAIN}.brews.{{}}"  # .format(entry_id)
 MAX_STORED_BREWS: Final = 20
 # Learned stop model (tau, c, covariance) and the last cut brew.
 STOP_STORAGE_VERSION: Final = 1
+# 1.2 (0.5.0): ``settings`` (target ratio, target yield, active bean) kept by
+# the integration instead of only in the number entities' restore state.
+STOP_STORAGE_MINOR_VERSION: Final = 2
 STOP_STORAGE_KEY: Final = f"{DOMAIN}.stop_learning.{{}}"  # .format(entry_id)
 
 # Brew tracker housekeeping while a brew is active (stall check, tail end,

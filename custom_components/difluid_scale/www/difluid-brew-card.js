@@ -21,9 +21,29 @@
  * jumps; drops are ignored), then flow = least-squares slope over the last
  * flow_smoothing seconds. Both use only earlier points, so the live curve is
  * never revised. Plotted weight, hover and live stats use these values.
+ *
+ * Detail line (stored brews): bean and the shot metrics the integration
+ * computes per brew (time to first drop, peak flow, mean flow and its
+ * variation in the main phase); parts that are missing are left out.
+ *
+ * Target: under the yield (stored brew) or the weight (live, ready) the
+ * auto-stop target of that brew in small text; nothing while the auto-stop
+ * is off or for brews stored without one. The line is always reserved, so
+ * the stats do not change height between the views.
+ *
+ * Expansion (expand_when_active): while the card is active (ready view, or
+ * a real live brew incl. its tail; not a replay) it lifts itself out of its
+ * grid slot into a position: fixed layer over the dashboard view (below the
+ * app header, inset like the sections view) on an opaque theme backdrop,
+ * with the chart filling the height. Its slot keeps the old size, so the
+ * grid does not reflow. The surface opens with a clip-path reveal from the
+ * old rect, then the content enters; collapsing reverses it and the saved
+ * brew fades in. Web Animations, cancellable mid-way; instant with reduced
+ * motion and when the card appears while active (after the live
+ * subscription's snapshot); never in edit mode or the editor.
  */
 
-const CARD_VERSION = "0.3.1";
+const CARD_VERSION = "0.5.0";
 const DOMAIN = "difluid_scale";
 
 const STRINGS = {
@@ -59,9 +79,15 @@ const STRINGS = {
     replay_stop: "Stop replay",
     chart_height: "Chart height",
     chart_height_helper: "Pixels (e.g. 320) or \"fill\" to fill the screen below the card's top. Empty: default.",
+    expand_when_active: "Full screen while active",
+    expand_when_active_helper: "While \"Prepare brew\" is on or a brew runs, the card expands over the dashboard view and collapses afterwards.",
     ready: "Ready – brew starts soon",
     flow_smoothing: "Flow smoothing",
     flow_smoothing_helper: "Seconds (0–10): flow curve computed from the weight over this window. 0: the scale's raw values. Empty: 3.",
+    first_drop: "first drop",
+    peak_flow: "peak flow",
+    target: "target",
+    detail_hint: "Bean · time to first drop · peak flow · mean flow ± variation in the main phase",
   },
   de: {
     title: "Espresso",
@@ -95,9 +121,15 @@ const STRINGS = {
     replay_stop: "Wiedergabe beenden",
     chart_height: "Diagrammhöhe",
     chart_height_helper: "Pixel (z. B. 320) oder \"fill\", um den Bildschirm unterhalb des Kartenanfangs zu füllen. Leer: Standard.",
+    expand_when_active: "Vollbild während aktiv",
+    expand_when_active_helper: "Solange \"Bezug vorbereiten\" an ist oder ein Bezug läuft, legt sich die Karte über die Dashboard-Ansicht und kehrt danach zurück.",
     ready: "Bereit – Bezug startet gleich",
     flow_smoothing: "Flussglättung",
     flow_smoothing_helper: "Sekunden (0–10): Flusskurve aus dem Gewicht über dieses Fenster berechnet. 0: Rohwerte der Waage. Leer: 3.",
+    first_drop: "erster Tropfen",
+    peak_flow: "Spitzenfluss",
+    target: "Ziel",
+    detail_hint: "Bohne · Zeit bis zum ersten Tropfen · Spitzenfluss · mittlerer Fluss ± Schwankung in der Hauptphase",
   },
 };
 
@@ -111,6 +143,31 @@ const CHART_HEIGHT = 200; // default; also the minimum in fill mode
 const CHART_HEIGHT_MIN = 100; // bounds for a fixed chart_height (px)
 const CHART_HEIGHT_MAX = 2000;
 const FILL_MARGIN = 8; // px kept free below the card in fill mode
+// Expansion (expand_when_active): fixed layer over the dashboard view.
+const EXPAND_Z = 3; // HA's app header is z-index 4, the sections lie below
+const EXPAND_INSET = 16; // px around the card when the view padding is unknown
+const EXPAND_INSET_MAX = 64; // a measured inset above this is not the padding
+const EXPAND_MS = 380; // surface reveal
+const EXPAND_EASE = "cubic-bezier(0.2, 0, 0, 1)";
+const BACKDROP_MS = 200;
+const ENTER_MS = 150; // content after the surface; stats staggered
+const ENTER_STAGGER = 50;
+const CHART_ENTER_DELAY = 40;
+const CHART_ENTER_MS = 260;
+const LEAVE_MS = 120; // content out before collapsing
+const COLLAPSE_MS = 300;
+const COLLAPSE_EASE = "cubic-bezier(0.4, 0, 0.2, 1)";
+const RETURN_MS = 150; // saved brew fading in after the collapse
+// Ancestors that mean "dashboard edit mode / card editor": never expand.
+const EDITOR_TAGS = new Set([
+  "hui-card-preview",
+  "hui-card-picker",
+  "hui-dialog-edit-card",
+  "hui-card-edit-mode",
+  "hui-card-options",
+  "hui-dialog-edit-section",
+  "hui-section-edit-mode",
+]);
 const PAD = { left: 36, right: 40, top: 10, bottom: 24 };
 // Live axes start at an espresso-sized range and only grow.
 const LIVE_MIN = { t: 30, f: 3, w: 40 };
@@ -272,6 +329,40 @@ function svgEl(name, attrs) {
   return el;
 }
 
+// clip-path inset() with [top, right, bottom, left] in px.
+function insetCss(v, radius) {
+  return `inset(${v.map((n) => `${Math.round(n * 10) / 10}px`).join(" ")} round ${radius}px)`;
+}
+
+// Computed clip-path "inset(a b c d round r)" -> [top, right, bottom, left];
+// null for anything else (none, unparsable).
+function parseInset(value) {
+  const m = /^\s*inset\(([^)]*)\)/.exec(value || "");
+  if (!m) return null;
+  const nums = m[1].split(/\s+round\s+/)[0].trim().split(/\s+/).map(parseFloat);
+  if (!nums.length || nums.some((n) => !Number.isFinite(n))) return null;
+  const [t, r = t, b = t, l = r] = nums;
+  return [t, r, b, l];
+}
+
+// Inset that clips the rect `outer` down to the rect `inner` (both
+// viewport rects); parts of `inner` outside `outer` are clamped.
+function insetBetween(inner, outer) {
+  return [
+    Math.max(0, inner.top - outer.top),
+    Math.max(0, outer.right - inner.right),
+    Math.max(0, outer.bottom - inner.bottom),
+    Math.max(0, inner.left - outer.left),
+  ];
+}
+
+// Composed parent: through shadow roots to their host.
+function composedParent(node) {
+  if (!node) return null;
+  if (node.assignedSlot) return node.assignedSlot;
+  return node.parentNode || node.host || null;
+}
+
 // chart_height option: absent -> null (default), "fill", or pixels.
 // Throws a readable error for anything else (shown by setConfig).
 function parseChartHeight(value) {
@@ -295,7 +386,8 @@ function parseChartHeight(value) {
   );
 }
 
-function targetOf(config) {
+// Which scale the card shows (websocket target fields), not a brew target.
+function scaleOf(config) {
   const t = {};
   if (config.device_id) t.device_id = config.device_id;
   if (config.entry_id) t.entry_id = config.entry_id;
@@ -323,6 +415,7 @@ class DifluidBrewCard extends HTMLElement {
     this._liveIdles = 0; // live_idle messages since our own subscribe
     this._ready = false; // "Prepare brew" switch (live_ready)
     this._readyDose = null; // dose of the next brew (live_ready)
+    this._readyTarget = null; // its auto-stop target in g (live_ready)
     this._smoothing = FLOW_SMOOTHING_DEFAULT;
     this._displayCache = new WeakMap(); // points array -> displayed points
     this._readyConn = null;
@@ -345,6 +438,62 @@ class DifluidBrewCard extends HTMLElement {
     this._chartH = CHART_HEIGHT; // current chart height in px
     this._fitRaf = 0;
     this._onViewport = () => this._scheduleFit();
+    // Expansion state: idle | expanding | expanded | collapsing.
+    this._xPhase = "idle";
+    this._expanded = false; // card in the fixed layer (incl. both animations)
+    this._expandRect = null; // card rect while expanded (viewport px)
+    this._anims = { surface: null, backdrop: null, content: [] };
+    this._enterPending = false; // content enters after the next render
+    this._relayout = false; // chart width/height to re-measure after render
+    this._renderHeld = false; // collapse running: keep the live view
+    this._renderDeferred = false;
+    this._instant = true; // initial state snapshot: expand without animation
+    this._liveKnown = false; // live_start or live_ready arrived since (re)subscribing
+    this._enterFrom = null; // content opacities when an expand interrupts a collapse
+    this._hostHeight = null; // host's inline height before the placeholder
+    this._editMode = false;
+    this._preview = false;
+    this._onExpandResize = () => {
+      if (!this._expanded) return;
+      // A running animation ends at its end state first (its rects are
+      // stale), then the layer is laid out anew.
+      if (this._xPhase === "collapsing") {
+        this._finishCollapse(true);
+        return;
+      }
+      if (this._xPhase === "expanding") {
+        this._stopExpandAnims();
+        this._xPhase = "expanded";
+      }
+      this._layoutExpanded();
+      this._fit();
+    };
+    // Swipes and wheel on the fixed layer must not scroll the dashboard
+    // underneath (the slot would move away from the collapse target).
+    this._blockScroll = (ev) => {
+      if (ev.cancelable) ev.preventDefault();
+    };
+  }
+
+  // Set by Home Assistant on cards in edit mode / the editor preview.
+  set editMode(v) {
+    if (!!v === this._editMode) return;
+    this._editMode = !!v;
+    if (this._built) this._render();
+  }
+
+  get editMode() {
+    return this._editMode;
+  }
+
+  set preview(v) {
+    if (!!v === this._preview) return;
+    this._preview = !!v;
+    if (this._built) this._render();
+  }
+
+  get preview() {
+    return this._preview;
   }
 
   static getStubConfig() {
@@ -360,7 +509,7 @@ class DifluidBrewCard extends HTMLElement {
     const heightMode = parseChartHeight(config.chart_height);
     this._smoothing = parseFlowSmoothing(config.flow_smoothing);
     const changed =
-      JSON.stringify(targetOf(config)) !== JSON.stringify(targetOf(this._config));
+      JSON.stringify(scaleOf(config)) !== JSON.stringify(scaleOf(this._config));
     this._config = { ...config };
     this._setHeightMode(heightMode);
     if (changed) {
@@ -371,6 +520,8 @@ class DifluidBrewCard extends HTMLElement {
       this._ready = false;
       this._readyDose = null;
       this._setLive(null);
+      this._instant = true;
+      this._liveKnown = false;
       if (this._hass && this.isConnected) {
         this._unsubscribe();
         this._subscribe();
@@ -391,6 +542,11 @@ class DifluidBrewCard extends HTMLElement {
     } else if (newConn && this.isConnected) {
       // New websocket connection object: retry at once what failed.
       this._retryNow();
+    }
+    // Edit mode is not always announced to the card: re-check it.
+    if (this._built && this._config.expand_when_active === true) {
+      const on = this._xPhase === "expanding" || this._xPhase === "expanded";
+      if (this._wantExpanded() !== on) this._render();
     }
   }
 
@@ -423,6 +579,13 @@ class DifluidBrewCard extends HTMLElement {
     const wasFill = this._heightMode === "fill";
     this._heightMode = mode;
     if (mode !== "fill") this._unwatchViewport();
+    if (this._expanded) {
+      // Expanded: the chart fills the layer whatever the configured mode;
+      // the mode applies again after the collapse.
+      if (mode === "fill" && this.isConnected) this._watchViewport();
+      this._scheduleFit();
+      return;
+    }
     // Fill keeps its fitted height across setConfig calls (no flicker).
     if (!(mode === "fill" && wasFill)) {
       this._applyChartHeight(typeof mode === "number" ? mode : CHART_HEIGHT);
@@ -437,8 +600,24 @@ class DifluidBrewCard extends HTMLElement {
     const changed = h !== this._chartH;
     this._chartH = h;
     if (this._chartBox) this._chartBox.style.height = `${h}px`;
-    if (this._card) this._card.classList.toggle("fill", this._heightMode === "fill");
+    if (this._card) this._card.classList.toggle("fill", this._fills());
     return changed;
+  }
+
+  // Chart fills the height: chart_height: fill, or expanded.
+  _fills() {
+    return this._heightMode === "fill" || this._expanded;
+  }
+
+  // Configured chart height again (after a collapse).
+  _restoreHeight() {
+    if (this._heightMode === "fill") {
+      if (this._card) this._card.classList.add("fill");
+      if (this.isConnected) this._watchViewport();
+      this._fit();
+    } else {
+      this._applyChartHeight(typeof this._heightMode === "number" ? this._heightMode : CHART_HEIGHT);
+    }
   }
 
   // Fill mode: grow the chart so the card ends at the bottom of the visible
@@ -447,8 +626,16 @@ class DifluidBrewCard extends HTMLElement {
   // never feeds back into the result.
   _fit() {
     this._fitRaf = 0;
-    if (this._heightMode !== "fill" || !this._chartBox || !this.isConnected) return;
+    if (!this._fills() || !this._chartBox || !this.isConnected) return;
     const box = this._chartBox.getBoundingClientRect();
+    if (this._expanded) {
+      // The card has a fixed height: the chart takes what is left of it.
+      const card = this._card.getBoundingClientRect();
+      const pad = parseFloat(getComputedStyle(this._card).paddingBottom) || 0;
+      const fit = Math.max(CHART_HEIGHT_MIN, Math.floor(card.bottom - box.top - pad));
+      if (this._applyChartHeight(fit)) this._renderChart();
+      return;
+    }
     if (!box.width && !box.height) return; // hidden (e.g. conditional section)
     // Document coordinates: window scrolling does not change the result.
     const top = box.top + (window.scrollY || 0);
@@ -460,7 +647,7 @@ class DifluidBrewCard extends HTMLElement {
   }
 
   _scheduleFit() {
-    if (this._heightMode !== "fill" || this._fitRaf) return;
+    if (!this._fills() || this._fitRaf) return;
     this._fitRaf = requestAnimationFrame(() => this._fit());
   }
 
@@ -503,14 +690,26 @@ class DifluidBrewCard extends HTMLElement {
       this._watchViewport();
       this._scheduleFit();
     }
+    // (Re)connected: no expansion until the live subscription's snapshot
+    // has arrived, then at once without animation (page load or view
+    // switch during a brew, edit mode left).
+    this._instant = true;
+    this._liveKnown = false;
+    if (this._hass) this._render();
   }
 
   disconnectedCallback() {
+    this._teardownExpansion();
     this._unsubscribe();
     this._cancelRetry();
     if (this._resize) this._resize.disconnect();
     this._unwatchViewport();
     this._setLive(null);
+    // The ready state comes again with the next subscription's snapshot.
+    this._ready = false;
+    this._readyDose = null;
+    this._readyTarget = null;
+    this._liveKnown = false;
     if (this._raf) cancelAnimationFrame(this._raf);
     this._raf = 0;
     this._pending = { stats: false, chart: false };
@@ -527,7 +726,7 @@ class DifluidBrewCard extends HTMLElement {
   _subscribe() {
     if (!this._hass) return;
     const conn = this._hass.connection;
-    const target = targetOf(this._config);
+    const scale = scaleOf(this._config);
     // The websocket library resubscribes by itself after a reconnect;
     // anything saved or corrected meanwhile was missed: reload then.
     if (this._readyConn !== conn) {
@@ -539,14 +738,14 @@ class DifluidBrewCard extends HTMLElement {
     if (!this._unsub) {
       this._unsub = this._track("_unsub", conn.subscribeMessage((msg) => this._onUpdate(msg), {
         type: `${DOMAIN}/subscribe_brews`,
-        ...target,
+        ...scale,
       }));
     }
     if (!this._liveUnsub) {
       this._liveIdles = 0;
       this._liveUnsub = this._track("_liveUnsub", conn.subscribeMessage((msg) => this._onLive(msg), {
         type: `${DOMAIN}/subscribe_live`,
-        ...target,
+        ...scale,
       }));
     }
   }
@@ -624,6 +823,7 @@ class DifluidBrewCard extends HTMLElement {
   _onLive(msg) {
     if (!msg || !msg.type) return;
     if (msg.type === "live_start") {
+      this._liveKnown = true;
       this._setLive({
         startTs: msg.start_ts,
         dose: msg.dose,
@@ -670,15 +870,37 @@ class DifluidBrewCard extends HTMLElement {
     } else if (msg.type === "live_ready") {
       const ready = !!msg.ready;
       const dose = ready && msg.dose != null ? msg.dose : null;
-      if (ready === this._ready && dose === this._readyDose) return;
-      this._ready = ready;
-      this._readyDose = dose;
-      // Only the empty ready view changes; a live brew or replay goes on.
-      if (!this._live) {
-        this._hover = null;
-        this._render();
+      const target = ready && msg.target != null ? msg.target : null;
+      const known = this._liveKnown;
+      this._liveKnown = true;
+      // With expand_when_active, "Prepare brew" turned on ends a replay so
+      // the ready view shows and the card expands. Without it: unchanged.
+      const endReplay =
+        ready &&
+        this._config.expand_when_active === true &&
+        !!(this._live && this._live.replay);
+      if (endReplay) this._setLive(null);
+      if (
+        endReplay ||
+        !known ||
+        ready !== this._ready ||
+        dose !== this._readyDose ||
+        target !== this._readyTarget
+      ) {
+        this._ready = ready;
+        this._readyDose = dose;
+        this._readyTarget = target;
+        // Only the empty ready view changes; a live brew goes on.
+        if (!this._live) {
+          this._hover = null;
+          this._render();
+        }
       }
+      // live_ready closes the snapshot a new subscription starts with;
+      // from now on (de)activation is animated.
+      this._instant = false;
     } else if (msg.type === "live_idle") {
+      // Not yet known: the ready state follows in live_ready.
       const resubscribed = this._liveIdles++ > 0;
       if (this._live && !this._live.replay) {
         // Missed the end (e.g. websocket reconnect): back to the history.
@@ -707,6 +929,9 @@ class DifluidBrewCard extends HTMLElement {
     l.elapsed = msg.elapsed || 0;
     l.phase = msg.phase || "brewing";
     l.stop = msg.stop;
+    l.cut = msg.cut != null ? msg.cut : null;
+    // Replay ticks carry no target: the stored brew's one stays.
+    if ("target" in msg) l.target = msg.target;
     l.recvAt = performance.now();
   }
 
@@ -728,6 +953,8 @@ class DifluidBrewCard extends HTMLElement {
   _liveElapsed() {
     const l = this._live;
     if (!l) return 0;
+    // Auto-stop cut: the brew time stops there (pump off), weighing goes on.
+    if (l.cut != null) return l.cut;
     if (l.phase === "tail" && l.stop != null) return l.stop;
     if (l.phase === "tail") return l.elapsed;
     // Between messages, run on locally; never more than 1 s ahead.
@@ -840,6 +1067,12 @@ class DifluidBrewCard extends HTMLElement {
     return this._ready && !this._live;
   }
 
+  // Active: the ready view, or a real live brew (any phase incl. tail);
+  // a replay of a stored brew is not.
+  _isActive() {
+    return this._readyView() || !!(this._live && !this._live.replay);
+  }
+
   // Live points up to the drawn end, with an interpolated end point.
   _liveVisible(pts) {
     const l = this._live;
@@ -873,6 +1106,7 @@ class DifluidBrewCard extends HTMLElement {
       cursor: 0,
       duration: brew.duration,
       dose: brew.dose,
+      target: brew.target != null ? brew.target : null,
       points: [],
       startedAt: performance.now(),
     });
@@ -936,7 +1170,7 @@ class DifluidBrewCard extends HTMLElement {
     try {
       const res = await this._hass.callWS({
         type: `${DOMAIN}/brews`,
-        ...targetOf(this._config),
+        ...scaleOf(this._config),
       });
       if (token !== this._loadToken) return;
       this._brews = res.brews || [];
@@ -962,7 +1196,7 @@ class DifluidBrewCard extends HTMLElement {
     const res = await this._hass.callWS({
       type: `${DOMAIN}/brew`,
       brew_id: summary.id,
-      ...targetOf(this._config),
+      ...scaleOf(this._config),
     });
     if (res.brew) this._cache.set(summary.id, res.brew);
   }
@@ -982,6 +1216,360 @@ class DifluidBrewCard extends HTMLElement {
     this._render();
   }
 
+  // ------------------------------------------------------------- expansion
+
+  _wantExpanded() {
+    return (
+      this._built &&
+      this.isConnected &&
+      this._config.expand_when_active === true &&
+      this._liveKnown &&
+      this._isActive() &&
+      !this._inEditor()
+    );
+  }
+
+  // Dashboard edit mode or the card editor preview: properties Home
+  // Assistant sets on the card, an editor ancestor, or a lovelace object in
+  // edit mode on the way up to hui-root.
+  _inEditor() {
+    if (this._editMode || this._preview) return true;
+    let n = composedParent(this);
+    for (let i = 0; n && i < 200; i++) {
+      const tag = (n.localName || "").toLowerCase();
+      if (EDITOR_TAGS.has(tag)) return true;
+      if (n.editMode === true || n.preview === true) return true;
+      if (n.lovelace && n.lovelace.editMode) return true;
+      if (tag === "hui-root") break;
+      n = composedParent(n);
+    }
+    return false;
+  }
+
+  // Area the card expands over (viewport px): the dashboard view below the
+  // app header, to the viewport's right and bottom edges; the whole viewport
+  // when HA's structure is not found. Plus the inset the sections view uses.
+  _expandArea() {
+    const de = document.documentElement || {};
+    const vw = de.clientWidth || window.innerWidth || 0;
+    const vh = de.clientHeight || window.innerHeight || 0;
+    const path = [];
+    let view = null;
+    let root = null;
+    let n = composedParent(this);
+    for (let i = 0; n && i < 200; i++) {
+      const tag = (n.localName || "").toLowerCase();
+      if (tag) path.push(n);
+      if (tag === "hui-view-container" || tag === "hui-view") view = n; // outermost wins
+      if (tag === "hui-root") {
+        root = n;
+        break;
+      }
+      n = composedParent(n);
+    }
+    let left = 0;
+    let top = 0;
+    if (view && view.getBoundingClientRect) {
+      left = Math.max(0, Math.min(vw, view.getBoundingClientRect().left));
+    }
+    const header = root && root.shadowRoot && root.shadowRoot.querySelector(".header");
+    if (header && header.getBoundingClientRect) {
+      const cs = getComputedStyle(header);
+      const r = header.getBoundingClientRect();
+      if (cs.display !== "none" && cs.visibility !== "hidden" && r.height > 0) {
+        top = Math.max(0, Math.min(vh, r.bottom));
+      }
+    }
+    return { left, top, right: vw, bottom: vh, inset: this._expandInset(path, view) };
+  }
+
+  // Padding of the view around its sections: the computed paddings of the
+  // ancestors between the card's section and the view (inclusive). The
+  // default when the structure is not found or the sum is implausible.
+  _expandInset(path, view) {
+    const fallback = { x: EXPAND_INSET, y: EXPAND_INSET };
+    if (!view) return fallback;
+    const end = path.indexOf(view);
+    let start = path.findIndex((el) => /^hui-(grid-)?section$/.test(el.localName || ""));
+    if (end < 0 || start < 0 || start >= end) return fallback;
+    let x = 0;
+    let y = 0;
+    for (let i = start + 1; i <= end; i++) {
+      const cs = getComputedStyle(path[i]);
+      x += (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.borderLeftWidth) || 0);
+      y += (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.borderTopWidth) || 0);
+    }
+    if (!(x >= 0 && x <= EXPAND_INSET_MAX && y >= 0 && y <= EXPAND_INSET_MAX)) return fallback;
+    return { x, y };
+  }
+
+  // Positions backdrop and card in the fixed layer (also on resize).
+  _layoutExpanded() {
+    const a = this._expandArea();
+    const w = Math.max(0, a.right - a.left);
+    const h = Math.max(0, a.bottom - a.top);
+    const ix = Math.min(a.inset.x, w / 4);
+    const iy = Math.min(a.inset.y, h / 4);
+    const rect = {
+      left: a.left + ix,
+      top: a.top + iy,
+      width: Math.max(0, w - 2 * ix),
+      height: Math.max(0, h - 2 * iy),
+    };
+    rect.right = rect.left + rect.width;
+    rect.bottom = rect.top + rect.height;
+    this._expandRect = rect;
+    const bs = this._backdrop.style;
+    bs.left = `${a.left}px`;
+    bs.top = `${a.top}px`;
+    bs.width = `${w}px`;
+    bs.height = `${h}px`;
+    this._backdrop.classList.add("on");
+    const cs = this._card.style;
+    cs.left = `${rect.left}px`;
+    cs.top = `${rect.top}px`;
+    cs.width = `${rect.width}px`;
+    cs.height = `${rect.height}px`;
+    this._card.classList.add("expanded");
+    this._relayout = true;
+  }
+
+  _cardRadius() {
+    const r = parseFloat(getComputedStyle(this._card).borderTopLeftRadius);
+    return Number.isFinite(r) ? r : 12;
+  }
+
+  // Cancels every expansion animation; returns what was visible just before
+  // (clip inset of the surface, backdrop opacity, content opacities), so the
+  // next animation starts where the last one stopped.
+  _stopExpandAnims() {
+    const a = this._anims;
+    const seen = { clip: null, backdrop: null, content: new Map() };
+    if (a.surface) seen.clip = parseInset(getComputedStyle(this._card).clipPath);
+    if (a.backdrop) {
+      const o = parseFloat(getComputedStyle(this._backdrop).opacity);
+      if (Number.isFinite(o)) seen.backdrop = o;
+    }
+    for (const anim of a.content) {
+      const el = anim.effect && anim.effect.target;
+      if (el && !seen.content.has(el)) {
+        const o = parseFloat(getComputedStyle(el).opacity);
+        if (Number.isFinite(o)) seen.content.set(el, o);
+      }
+    }
+    for (const anim of [a.surface, a.backdrop, ...a.content]) if (anim) anim.cancel();
+    this._anims = { surface: null, backdrop: null, content: [] };
+    return seen;
+  }
+
+  // Called by every render: expands or collapses when the wanted state
+  // differs from the current one.
+  _syncExpansion() {
+    const want = !!this._wantExpanded();
+    const on = this._xPhase === "expanding" || this._xPhase === "expanded";
+    if (want === on) return;
+    const animate =
+      !this._instant && !reducedMotion() && typeof this._card.animate === "function";
+    if (want) this._expand(animate);
+    else this._collapse(animate);
+  }
+
+  _expand(animate) {
+    const seen = this._stopExpandAnims();
+    let from = seen.clip;
+    if (this._xPhase === "idle") {
+      // The host stays in the grid with its current size (placeholder).
+      const slot = this.getBoundingClientRect();
+      this._hostHeight = this.style.height;
+      this.style.height = `${slot.height}px`;
+      this._expanded = true;
+      this._layoutExpanded();
+      from = insetBetween(slot, this._expandRect);
+      window.addEventListener("resize", this._onExpandResize);
+      window.addEventListener("orientationchange", this._onExpandResize);
+      for (const el of [this._backdrop, this._card]) {
+        el.addEventListener("touchmove", this._blockScroll, { passive: false });
+        el.addEventListener("wheel", this._blockScroll, { passive: false });
+      }
+      this._enterFrom = null;
+    } else {
+      // Interrupting a collapse: the content fades in from where it is.
+      this._enterFrom = seen.content;
+    }
+    // From collapsing: the deferred render now shows the active view.
+    this._renderHeld = false;
+    this._renderDeferred = false;
+    this._card.classList.add("fill");
+    if (!animate) {
+      this._xPhase = "expanded";
+      this._enterPending = false;
+      return;
+    }
+    this._xPhase = "expanding";
+    const radius = this._cardRadius();
+    const surface = this._card.animate(
+      [{ clipPath: insetCss(from || [0, 0, 0, 0], radius) }, { clipPath: insetCss([0, 0, 0, 0], radius) }],
+      { duration: EXPAND_MS, easing: EXPAND_EASE }
+    );
+    surface.onfinish = () => {
+      if (this._anims.surface !== surface) return;
+      this._anims.surface = null;
+      this._xPhase = "expanded";
+    };
+    this._anims.surface = surface;
+    const b0 = seen.backdrop != null ? seen.backdrop : 0;
+    this._anims.backdrop = this._backdrop.animate([{ opacity: b0 }, { opacity: 1 }], {
+      duration: BACKDROP_MS * (1 - b0),
+      easing: "linear",
+    });
+    this._enterPending = true; // after the render: the new elements enter
+  }
+
+  _collapse(animate) {
+    const seen = this._stopExpandAnims();
+    this._enterPending = false;
+    if (!animate || !this._expandRect) {
+      this._finishCollapse(false);
+      return;
+    }
+    this._xPhase = "collapsing";
+    // The live view stays visible while it fades and the surface shrinks.
+    this._renderHeld = true;
+    this._renderDeferred = true;
+    const radius = this._cardRadius();
+    const to = insetBetween(this.getBoundingClientRect(), this._expandRect);
+    const content = [];
+    for (const el of Array.from(this._card.children)) {
+      const o0 = seen.content.has(el) ? seen.content.get(el) : 1;
+      content.push(
+        el.animate([{ opacity: o0 }, { opacity: 0 }], { duration: LEAVE_MS, easing: "ease-in", fill: "forwards" })
+      );
+    }
+    this._anims.content = content;
+    const surface = this._card.animate(
+      [{ clipPath: insetCss(seen.clip || [0, 0, 0, 0], radius) }, { clipPath: insetCss(to, radius) }],
+      { duration: COLLAPSE_MS, delay: LEAVE_MS, easing: COLLAPSE_EASE, fill: "both" }
+    );
+    surface.onfinish = () => {
+      if (this._anims.surface === surface) this._finishCollapse(true);
+    };
+    this._anims.surface = surface;
+    const b0 = seen.backdrop != null ? seen.backdrop : 1;
+    this._anims.backdrop = this._backdrop.animate([{ opacity: b0 }, { opacity: 0 }], {
+      duration: BACKDROP_MS,
+      delay: LEAVE_MS + COLLAPSE_MS - BACKDROP_MS,
+      easing: "linear",
+      fill: "both",
+    });
+  }
+
+  // Back into the grid slot. `fade`: after an animated collapse, render the
+  // deferred view and fade it in.
+  _finishCollapse(fade) {
+    this._stopExpandAnims();
+    this._unfix();
+    this._xPhase = "idle";
+    this._restoreHeight();
+    this._relayout = true;
+    const deferred = this._renderDeferred;
+    this._renderHeld = false;
+    this._renderDeferred = false;
+    if (!fade) return; // called from a render, which goes on
+    if (deferred) this._render();
+    else this._afterRender();
+    if (typeof this._card.animate !== "function") return;
+    for (const el of Array.from(this._card.children)) {
+      this._anims.content.push(
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: RETURN_MS, easing: "ease-out" })
+      );
+    }
+  }
+
+  // Removes the fixed layer and the placeholder size.
+  _unfix() {
+    window.removeEventListener("resize", this._onExpandResize);
+    window.removeEventListener("orientationchange", this._onExpandResize);
+    for (const el of [this._backdrop, this._card]) {
+      if (!el) continue;
+      el.removeEventListener("touchmove", this._blockScroll, { passive: false });
+      el.removeEventListener("wheel", this._blockScroll, { passive: false });
+    }
+    this._expanded = false;
+    this._expandRect = null;
+    this._enterFrom = null;
+    if (this._card) {
+      this._card.classList.remove("expanded");
+      for (const k of ["left", "top", "width", "height"]) this._card.style[k] = "";
+      this._card.classList.toggle("fill", this._heightMode === "fill");
+    }
+    if (this._backdrop) this._backdrop.classList.remove("on");
+    if (this._hostHeight !== null) {
+      this.style.height = this._hostHeight;
+      this._hostHeight = null;
+    }
+  }
+
+  // Card removed: nothing may stay fixed, clipped or animating.
+  _teardownExpansion() {
+    if (!this._built) return;
+    this._stopExpandAnims();
+    const wasExpanded = this._expanded;
+    this._unfix();
+    this._xPhase = "idle";
+    this._enterPending = false;
+    this._renderHeld = false;
+    this._renderDeferred = false;
+    if (wasExpanded) this._restoreHeight();
+  }
+
+  // After the content is rendered: re-measure the chart for a new layout,
+  // then let the content enter (expand animation).
+  _afterRender() {
+    if (this._relayout) {
+      this._relayout = false;
+      const w = Math.round(this._chartBox.getBoundingClientRect().width);
+      if (w && w !== this._width) {
+        this._width = w;
+        this._renderChart();
+      }
+    }
+    if (this._expanded) this._fit();
+    if (this._enterPending) {
+      this._enterPending = false;
+      this._enter();
+    }
+  }
+
+  // Ready/live content entering after the surface: head, stats and legend
+  // (stable containers; the live stats replace their children every frame)
+  // fade in and move up a little, staggered; the chart wipes in from the
+  // left. After an interrupted collapse each starts at its current opacity.
+  _enter() {
+    if (typeof this._card.animate !== "function") return;
+    const from = this._enterFrom;
+    this._enterFrom = null;
+    const o0 = (el) => (from && from.has(el) ? from.get(el) : 0);
+    const opts = (delay, duration) => ({ duration, delay, easing: EXPAND_EASE, fill: "backwards" });
+    const lift = (el) => [
+      { opacity: o0(el), transform: from ? "none" : "translateY(6px)" },
+      { opacity: 1, transform: "none" },
+    ];
+    const content = this._anims.content;
+    // The legend ends ENTER_STAGGER * 2 + ENTER_MS = 250 ms, the chart
+    // CHART_ENTER_DELAY + CHART_ENTER_MS = 300 ms after the surface.
+    [this._head, this._els.stats, this._els.legend].forEach((el, i) =>
+      content.push(el.animate(lift(el), opts(EXPAND_MS + i * ENTER_STAGGER, ENTER_MS)))
+    );
+    const chart = this._chartBox;
+    const chartFrames = from
+      ? [{ opacity: o0(chart) }, { opacity: 1 }]
+      : [
+          { opacity: 0, clipPath: "inset(0 100% 0 0)" },
+          { opacity: 1, clipPath: "inset(0 0 0 0)" },
+        ];
+    content.push(chart.animate(chartFrames, opts(EXPAND_MS + CHART_ENTER_DELAY, CHART_ENTER_MS)));
+  }
+
   // ---------------------------------------------------------------- render
 
   _build() {
@@ -995,6 +1583,8 @@ class DifluidBrewCard extends HTMLElement {
         .titles { flex: 1; min-width: 0; }
         .title { font-size: 1.1rem; font-weight: 500; color: var(--primary-text-color); line-height: 1.3; }
         .when { font-size: 0.85rem; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .detail { font-size: 0.75rem; line-height: 1.3; min-height: 1.3em; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+        .invisible { visibility: hidden; }
         .nav { display: flex; align-items: center; gap: 2px; color: var(--secondary-text-color); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
         button { all: unset; cursor: pointer; width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; color: var(--primary-text-color); }
         button:hover { background: var(--secondary-background-color); }
@@ -1005,7 +1595,7 @@ class DifluidBrewCard extends HTMLElement {
         .stat .label { font-size: 0.75rem; color: var(--secondary-text-color); text-transform: uppercase; letter-spacing: 0.04em; }
         .stat .value { font-size: 1.35rem; color: var(--primary-text-color); font-variant-numeric: tabular-nums; white-space: nowrap; }
         .stat .unit { font-size: 0.85rem; color: var(--secondary-text-color); margin-left: 2px; }
-        .stat .note { font-size: 0.7rem; color: var(--secondary-text-color); }
+        .stat-note { font-size: 0.7rem; line-height: 1.3; min-height: 1.3em; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .legend { display: flex; gap: 16px; font-size: 0.8rem; color: var(--secondary-text-color); align-items: center; min-height: 1.2em; }
         .legend .key { display: inline-flex; align-items: center; gap: 6px; }
         .legend .swatch { width: 14px; height: 0; border-top: 2px solid; }
@@ -1032,12 +1622,19 @@ class DifluidBrewCard extends HTMLElement {
         ha-card.fill .stats.live .stat.big .unit { font-size: 1.1rem; }
         ha-card.fill .stats.live .stat.big .label { font-size: 0.85rem; }
         .hidden { display: none !important; }
+        .backdrop { display: none; position: fixed; z-index: ${EXPAND_Z}; background: var(--lovelace-background, var(--primary-background-color)); background-attachment: fixed; }
+        .backdrop.on { display: block; }
+        ha-card.expanded { position: fixed; z-index: ${EXPAND_Z}; margin: 0; overflow: hidden; transition: none; overscroll-behavior: contain; }
+        .backdrop.on { overscroll-behavior: contain; }
+        ha-card.expanded .chart { touch-action: none; }
       </style>
+      <div class="backdrop" aria-hidden="true"></div>
       <ha-card>
         <div class="head">
           <div class="titles">
             <div class="title"><span class="title-text"></span><span class="badge hidden"><span class="dot"></span><span class="badge-text"></span></span></div>
             <div class="when"></div>
+            <div class="detail invisible"></div>
           </div>
           <div class="nav">
             <button class="replay"><svg viewBox="0 0 24 24"><path d="${ICON_PLAY}"></path></svg></button>
@@ -1059,6 +1656,7 @@ class DifluidBrewCard extends HTMLElement {
       badgeText: $(".badge-text"),
       note: $(".note"),
       when: $(".when"),
+      detail: $(".detail"),
       nav: $(".nav"),
       prev: $(".prev"),
       replay: $(".replay"),
@@ -1071,6 +1669,8 @@ class DifluidBrewCard extends HTMLElement {
     };
     this._chartBox = $(".chart");
     this._card = $("ha-card");
+    this._backdrop = $(".backdrop");
+    this._head = $(".head");
     this._applyChartHeight(this._chartH);
     // Brews are newest first: "older" moves up the list.
     this._els.prev.addEventListener("click", () => this._step(1));
@@ -1094,6 +1694,17 @@ class DifluidBrewCard extends HTMLElement {
 
   _render() {
     if (!this._built) this._build();
+    this._syncExpansion();
+    if (this._renderHeld) {
+      // Collapsing: the live view stays until the card is back in its slot.
+      this._renderDeferred = true;
+      return;
+    }
+    this._renderContent();
+    this._afterRender();
+  }
+
+  _renderContent() {
     const e = this._els;
     e.title.textContent = this._config.title || this._t("title");
     e.prev.title = this._t("older");
@@ -1112,6 +1723,8 @@ class DifluidBrewCard extends HTMLElement {
     e.replayIcon.setAttribute("d", replaying ? ICON_STOP : ICON_PLAY);
     e.nav.classList.toggle("replaying", replaying);
     if (this._live || readyView) {
+      // Space kept (not hidden): the header does not jump at the brew end.
+      e.detail.classList.add("invisible");
       e.message.classList.add("hidden");
       // A real live brew has no navigation; a replay keeps its stop button.
       e.nav.classList.toggle("hidden", !replaying);
@@ -1137,6 +1750,7 @@ class DifluidBrewCard extends HTMLElement {
     }
     if (!showData) {
       e.when.textContent = "";
+      e.detail.classList.add("invisible");
       return;
     }
 
@@ -1154,13 +1768,19 @@ class DifluidBrewCard extends HTMLElement {
       minute: "2-digit",
     });
 
+    const detail = this._detailText(summary);
+    e.detail.textContent = detail;
+    e.detail.title = this._t("detail_hint");
+    e.detail.classList.toggle("invisible", !detail);
+
     const stat = (label, value, unit, note) => `
       <div class="stat">
         <div class="label">${label}</div>
         <div class="value">${value}${unit ? `<span class="unit">${unit}</span>` : ""}</div>
-        ${note ? `<div class="note">${note}</div>` : ""}
+        <div class="stat-note">${note || ""}</div>
       </div>`;
-    const ratio = summary.ratio == null ? "–" : `1:${this._fmt(summary.ratio, 1)}`;
+    // Stored brews: two decimals (1:2.43), as stored.
+    const ratio = summary.ratio == null ? "–" : `1:${this._fmt(summary.ratio, 2)}`;
     e.stats.innerHTML =
       stat(
         this._t("dose"),
@@ -1168,12 +1788,32 @@ class DifluidBrewCard extends HTMLElement {
         summary.dose == null ? "" : "g",
         summary.dose_source === "manual" ? this._t("corrected") : ""
       ) +
-      stat(this._t("yield"), this._fmt(summary.yield, 1), "g") +
+      stat(this._t("yield"), this._fmt(summary.yield, 1), "g", this._targetText(summary.target)) +
       stat(this._t("ratio"), ratio, "") +
       stat(this._t("time"), this._fmt(summary.duration, 1), "s");
 
     this._renderLegend();
     this._renderChart();
+  }
+
+  // "target 40.0 g" for a target in grams; "" without one.
+  _targetText(target) {
+    if (target === null || target === undefined) return "";
+    return `${this._t("target")} ${this._fmt(target, 1)} g`;
+  }
+
+  // Bean and shot metrics of a stored brew, "" when there is nothing.
+  _detailText(summary) {
+    const parts = [];
+    if (summary.bean) parts.push(summary.bean);
+    const m = summary.metrics || {};
+    if (m.first_drop != null) parts.push(`${this._t("first_drop")} ${this._fmt(m.first_drop, 1)} s`);
+    if (m.peak_flow != null) parts.push(`${this._t("peak_flow")} ${this._fmt(m.peak_flow, 1)} g/s`);
+    if (m.mean_flow != null) {
+      const cv = m.flow_cv != null ? ` ±${this._fmt(m.flow_cv * 100, 0)} %` : "";
+      parts.push(`Ø ${this._fmt(m.mean_flow, 1)} g/s${cv}`);
+    }
+    return parts.join(" · ");
   }
 
   _renderLiveStats() {
@@ -1183,6 +1823,7 @@ class DifluidBrewCard extends HTMLElement {
     let elapsed = 0;
     let now = { weight: 0, flow: 0 };
     let dose = null;
+    let target = null;
     if (l) {
       const phase = l.phase || "brewing";
       e.badgeText.textContent = this._t(l.replay ? "replay" : "live");
@@ -1192,19 +1833,22 @@ class DifluidBrewCard extends HTMLElement {
       elapsed = this._liveElapsed();
       now = this._liveNow();
       dose = l.dose;
+      target = l.target;
     } else {
       e.when.textContent = this._t("ready");
       dose = this._readyDose;
+      target = this._readyTarget;
     }
-    const stat = (cls, label, value, unit) => `
+    const stat = (cls, label, value, unit, note) => `
       <div class="stat ${cls}">
         <div class="label">${label}</div>
         <div class="value">${value}${unit ? `<span class="unit">${unit}</span>` : ""}</div>
+        <div class="stat-note">${note || ""}</div>
       </div>`;
     const html =
       stat("big", this._t("time"), this._fmt(elapsed, 1), "s") +
       stat("big flow", this._t("flow_rate"), this._fmt(now.flow, 1), "g/s") +
-      stat("big", this._t("weight"), this._fmt(now.weight, 1), "g") +
+      stat("big", this._t("weight"), this._fmt(now.weight, 1), "g", this._targetText(target)) +
       stat("", this._t("dose"), this._fmt(dose, 1), dose == null ? "" : "g");
     if (html !== this._lastStatsHtml) {
       e.stats.innerHTML = html;
@@ -1491,11 +2135,18 @@ class DifluidBrewCardEditor extends HTMLElement {
     if (!this._form) {
       this._form = document.createElement("ha-form");
       this._form.computeLabel = (schema) =>
-        ({ device_id: s.device, chart_height: s.chart_height, flow_smoothing: s.flow_smoothing }[
-          schema.name
-        ] || s.card_title);
+        ({
+          device_id: s.device,
+          chart_height: s.chart_height,
+          expand_when_active: s.expand_when_active,
+          flow_smoothing: s.flow_smoothing,
+        }[schema.name] || s.card_title);
       this._form.computeHelper = (schema) =>
-        ({ chart_height: s.chart_height_helper, flow_smoothing: s.flow_smoothing_helper }[schema.name]);
+        ({
+          chart_height: s.chart_height_helper,
+          expand_when_active: s.expand_when_active_helper,
+          flow_smoothing: s.flow_smoothing_helper,
+        }[schema.name]);
       this._form.addEventListener("value-changed", (ev) => {
         const value = { ...ev.detail.value };
         for (const k of Object.keys(value)) {
@@ -1520,6 +2171,7 @@ class DifluidBrewCardEditor extends HTMLElement {
       { name: "device_id", selector: { device: { integration: DOMAIN } } },
       { name: "title", selector: { text: {} } },
       { name: "chart_height", selector: { text: {} } },
+      { name: "expand_when_active", selector: { boolean: {} } },
       {
         name: "flow_smoothing",
         selector: { number: { min: 0, max: FLOW_SMOOTHING_MAX, step: 0.5, mode: "box", unit_of_measurement: "s" } },

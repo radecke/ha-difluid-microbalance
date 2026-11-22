@@ -127,6 +127,9 @@
           },
           "dose": {
             "name": "Dosis"
+          },
+          "bean": {
+            "name": "Bohne"
           }
         }
       }
@@ -170,6 +173,55 @@
             }
           }
         }
+      },
+      "auto_stop": {
+        "name": "Auto-Stopp",
+        "state_attributes": {
+          "event_type": {
+            "name": "Ereignistyp",
+            "state": {
+              "cut": "Abgeschaltet",
+              "switch_failed": "Schalten fehlgeschlagen",
+              "learned": "Gelernt",
+              "outlier": "Ausreißer",
+              "not_settled": "Gewicht nicht zur Ruhe gekommen",
+              "brew_discarded": "Bezug verworfen",
+              "brew_truncated": "Bezug abgebrochen",
+              "cup_lifted": "Tasse vor dem Nachtropfen abgenommen"
+            }
+          },
+          "target": {
+            "name": "Zielgewicht"
+          },
+          "target_source": {
+            "name": "Zielquelle",
+            "state": {
+              "ratio": "Verhältnis × Dosis",
+              "yield": "Festes Zielgewicht"
+            }
+          },
+          "dose": {
+            "name": "Dosis"
+          },
+          "cut_weight": {
+            "name": "Gewicht beim Abschalten"
+          },
+          "cut_flow": {
+            "name": "Durchfluss beim Abschalten"
+          },
+          "predicted_overshoot": {
+            "name": "Vorhergesagter Nachlauf"
+          },
+          "final_yield": {
+            "name": "Endgewicht"
+          },
+          "deviation": {
+            "name": "Abweichung"
+          },
+          "bean": {
+            "name": "Bohne"
+          }
+        }
       }
     },
     "switch": {
@@ -190,6 +242,12 @@
           "gram": "Gramm",
           "ounce": "Unze",
           "gering": "Gering"
+        }
+      },
+      "bean": {
+        "name": "Bohne",
+        "state": {
+          "none": "Keine"
         }
       }
     },
@@ -226,15 +284,64 @@
     },
     "cut_outside_profile": {
       "message": "Das Profil des Bezugs hat keinen Punkt bei oder vor {cut_offset} s (oder der Bezug hat kein Gewicht)."
+    },
+    "bean_entry_unknown": {
+      "message": "Keine geladene DiFluid-Waage mit dem Konfigurationseintrag {config_entry_id}."
+    },
+    "bean_entry_ambiguous": {
+      "message": "Es sind mehrere DiFluid-Waagen eingerichtet; wähle eine mit config_entry_id."
+    },
+    "bean_name_empty": {
+      "message": "Gib einen Namen für die Bohne ein."
+    },
+    "bean_name_taken": {
+      "message": "Eine Bohne „{name}“ gibt es schon."
+    },
+    "bean_ratio_range": {
+      "message": "Das Zielverhältnis {ratio} liegt außerhalb von {min}–{max}."
+    },
+    "bean_ratio_missing": {
+      "message": "Kein Verhältnis angegeben und das aktuelle Zielverhältnis ({ratio}) liegt außerhalb von {min}–{max}; gib ein Verhältnis an."
+    },
+    "bean_unknown": {
+      "message": "Kein Bohnenprofil „{bean}“."
+    },
+    "bean_none_active": {
+      "message": "Keine Bohne angegeben und keine Bohne aktiv."
+    },
+    "bean_name_reserved": {
+      "message": "„{name}“ ist als Bohnenname nicht erlaubt."
+    },
+    "bean_name_too_long": {
+      "message": "Der Bohnenname ist länger als {max} Zeichen."
+    },
+    "bean_no_scale": {
+      "message": "Es ist keine DiFluid-Waage geladen."
+    },
+    "bean_delete_which": {
+      "message": "Gib genau eines an: name, bean_id oder active: true."
+    },
+    "bean_required": {
+      "message": "Wähle eine der Bohnen; „Keine“ gibt es nur, solange keine Bohnenprofile angelegt sind."
     }
   },
   "options": {
     "step": {
       "init": {
+        "title": "Optionen",
+        "description": "Bezugserkennung und Stopp-Schalter des Auto-Stopps, oder die Bohnenprofile. Ein Bohnenprofil merkt sich das Zielverhältnis je Bohne: Wähle die Bohne über die Entität „Bohne“, und das Zielverhältnis folgt; änderst du „Zielverhältnis“, während eine Bohne aktiv ist, wird ihr Profil angepasst.",
+        "menu_options": {
+          "detection": "Bezugserkennung und Stopp-Schalter",
+          "add_bean": "Bohnenprofil anlegen",
+          "edit_bean": "Bohnenprofil bearbeiten",
+          "delete_bean": "Bohnenprofil löschen"
+        }
+      },
+      "detection": {
         "title": "Bezugserkennung",
-        "description": "Ein Bezug ist die Zeit, in der der Timer der Waage läuft, plus ein kurzer Nachlauf für die Tropfen. Die Dosis erkennt die Integration automatisch, wenn die Bohnen vor dem Bezug gewogen werden. Alle Werte haben sinnvolle Voreinstellungen; ändere sie nur, wenn Bezüge fehlen, geteilt oder mit falscher Dosis gespeichert werden. Optional: ein Stopp-Schalter für den lernenden Auto-Stopp.",
+        "description": "Ein Bezug ist die Zeit, in der der Timer der Waage läuft, plus ein kurzer Nachlauf für die Tropfen. Die Dosis erkennt die Integration automatisch, wenn die Bohnen vor dem Bezug gewogen werden. Alle Werte haben sinnvolle Voreinstellungen; ändere sie nur, wenn Bezüge fehlen, geteilt oder mit falscher Dosis gespeichert werden. Optional: ein Stopp-Schalter für den lernenden Auto-Stopp. Bohnenprofile haben eigene Menüpunkte.",
         "data": {
-          "tail_seconds": "Nachlauf nach Timer-Stopp",
+          "tail_seconds": "Nachwiegen, wenn das Gewicht ruhig ist",
           "min_duration": "Mindestdauer eines Bezugs",
           "min_yield": "Mindestmenge im Becher",
           "dose_min": "Dosisbereich von",
@@ -245,7 +352,7 @@
           "stop_switch": "Stopp-Schalter"
         },
         "data_description": {
-          "tail_seconds": "Nach dem Stopp des Waagen-Timers wird so lange weiter aufgezeichnet, damit die Tropfen noch ins Endgewicht und in die Kurve zählen. Abheben der Tasse beendet den Nachlauf früher. Mit Auto-Stopp wird der Timer erst angehalten, wenn das Gewicht zur Ruhe gekommen ist; die Voreinstellung 3 s reicht dann.",
+          "tail_seconds": "Mit Auto-Stopp: Nach dem Abschalten läuft der Timer der Waage weiter, bis das Gewicht ruhig ist, und dann noch so lange für späte Tropfen; erst dann wird der Timer angehalten, und das Gewicht in diesem Moment ist das Endgewicht (und das, woraus der Auto-Stopp lernt). Abheben der Tasse beendet das sofort. Ohne Auto-Stopp (Timer von Hand oder von der Waage gestoppt) wird nach dem Timer-Stopp ebenfalls so lange weiter aufgezeichnet, aber die angehaltene Waage sendet kein Gewicht, Tropfen nach dem Stopp zählen also nicht: Stoppe den Timer erst, wenn die Tropfen drin sind.",
           "min_duration": "Kürzere Timerläufe werden nicht als Bezug gespeichert, z. B. ein kurzes Spülen oder ein versehentlich gestarteter Timer.",
           "min_yield": "Läufe mit weniger Gewicht in der Tasse werden nicht als Bezug gespeichert, z. B. wenn der Timer ohne Kaffee lief.",
           "dose_min": "So wird die Dosis erkannt: Dosierbecher oder Siebträger auf die Waage, tarieren, Bohnen einfüllen. Das letzte stabile Gewicht in diesem Bereich vor dem Bezug gilt als Dosis. Stell den Bereich um deine übliche Dosis (Voreinstellung 12–25 g).",
@@ -255,10 +362,59 @@
           "dose_lookback_minutes": "Nur Gewichtsplateaus, die höchstens so lange vor dem Bezug lagen, können seine Dosis werden; ältere werden ignoriert.",
           "stop_switch": "Optional. Ein Schalter, der den Bezug beim Ausschalten beendet, meist die Steckdose der Espressomaschine. Während eines Bezugs schaltet die Integration ihn so früh aus, dass die Tasse nach dem Nachtropfen beim Ziel landet, und lernt Verzögerung und Nachtropfen der Maschine aus jedem Bezug. Das Ziel stellst du über die Entitäten „Zielverhältnis“ (Verhältnis × erkannte Dosis) oder „Zielgewicht“ (feste Gramm, auch wenn keine Dosis erkannt wurde) ein. Leer lassen, um den Auto-Stopp abzuschalten."
         }
+      },
+      "add_bean": {
+        "title": "Bohnenprofil anlegen",
+        "description": "Ein Bohnenprofil merkt sich das Zielverhältnis für einen Kaffee. Der Auto-Stopp lernt weiter ein gemeinsames Modell für alle Bohnen; die Bohne kennzeichnet nur die Bezüge.",
+        "data": {
+          "name": "Name",
+          "ratio": "Zielverhältnis",
+          "note": "Notiz"
+        },
+        "data_description": {
+          "name": "Erscheint in der Entität „Bohne“, in der Bezugskarte und wird mit jedem Bezug gespeichert, der entsteht, während sie aktiv ist. Muss eindeutig sein.",
+          "ratio": "Ausbeute / Dosis für diese Bohne, z. B. 2,0 für 18 g rein, 36 g raus. Wählst du die Bohne, wird das Zielverhältnis des Auto-Stopps darauf gesetzt.",
+          "note": "Optional, für dich (Rösterei, Röstdatum, Mahlgrad)."
+        }
+      },
+      "edit_bean": {
+        "title": "Bohnenprofil bearbeiten",
+        "description": "Wähle das Bohnenprofil, das du ändern willst.",
+        "data": {
+          "id": "Bohne"
+        }
+      },
+      "edit_bean_details": {
+        "title": "{name} bearbeiten",
+        "description": "Gespeicherte Bezüge behalten den Namen, mit dem sie gespeichert wurden.",
+        "data": {
+          "name": "Name",
+          "ratio": "Zielverhältnis",
+          "note": "Notiz"
+        },
+        "data_description": {
+          "name": "Erscheint in der Entität „Bohne“, in der Bezugskarte und wird mit jedem Bezug gespeichert, der entsteht, während sie aktiv ist. Muss eindeutig sein.",
+          "ratio": "Ausbeute / Dosis für diese Bohne, z. B. 2,0 für 18 g rein, 36 g raus. Wählst du die Bohne, wird das Zielverhältnis des Auto-Stopps darauf gesetzt.",
+          "note": "Optional, für dich (Rösterei, Röstdatum, Mahlgrad)."
+        }
+      },
+      "delete_bean": {
+        "title": "Bohnenprofil löschen",
+        "description": "Gespeicherte Bezüge behalten den Bohnennamen. Ist die gelöschte Bohne aktiv, wird die neueste verbleibende Bohne aktiv und ihr Verhältnis wird zum Zielverhältnis; nach der letzten ist keine Bohne aktiv (das Zielverhältnis bleibt).",
+        "data": {
+          "id": "Bohne"
+        }
       }
     },
     "error": {
-      "dose_range": "Der Dosisbereich muss unten kleiner sein als oben."
+      "dose_range": "Der Dosisbereich muss unten kleiner sein als oben.",
+      "bean_name_empty": "Gib einen Namen ein.",
+      "bean_name_taken": "Eine Bohne mit diesem Namen gibt es schon.",
+      "bean_name_reserved": "Dieser Name ist reserviert („keine Bohne“, unbekannt, nicht verfügbar).",
+      "bean_name_too_long": "Höchstens 60 Zeichen."
+    },
+    "abort": {
+      "unknown_bean": "Das Bohnenprofil gibt es nicht mehr."
     }
   },
   "services": {
@@ -305,6 +461,60 @@
           "description": "Optional: Ziel dieses Bezugs; nur für die Abweichung in der Antwort."
         }
       }
+    },
+    "add_bean": {
+      "name": "Bohnenprofil anlegen",
+      "description": "Legt ein Bohnenprofil (Name, Zielverhältnis, Notiz) wie in den Optionen an, ohne die Integration neu zu laden; auch vom Dashboard aus nutzbar.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name der Bohne; eindeutig (ohne Groß-/Kleinschreibung), höchstens 60 Zeichen, nicht „none“/„Keine“/„unknown“/„unavailable“."
+        },
+        "ratio": {
+          "name": "Zielverhältnis",
+          "description": "Ausbeute / Dosis, 0,5–5. Leer: das aktuelle Zielverhältnis der Waage."
+        },
+        "note": {
+          "name": "Notiz",
+          "description": "Optional, z. B. Rösterei oder Mahlgrad."
+        },
+        "activate": {
+          "name": "Aktivieren",
+          "description": "Gleich zur aktiven Bohne machen, damit das Zielverhältnis folgt (Standard: an). Die erste Bohne wird immer aktiviert."
+        },
+        "config_entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Nur bei mehreren Waagen nötig."
+        }
+      }
+    },
+    "delete_bean": {
+      "name": "Bohnenprofil löschen",
+      "description": "Löscht ein Bohnenprofil: nach Name, nach ID oder die aktive Bohne mit active: true (genau eines davon). Gespeicherte Bezüge behalten den Bohnennamen; war es die aktive Bohne, wird die neueste verbleibende aktiv (ihr Verhältnis gilt); nach der letzten ist keine aktiv und das Zielverhältnis bleibt.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name der Bohne (ohne Groß-/Kleinschreibung)."
+        },
+        "bean_id": {
+          "name": "Bohnen-ID",
+          "description": "ID des Bohnenprofils (statt des Namens)."
+        },
+        "active": {
+          "name": "Aktive Bohne",
+          "description": "Die aktive Bohne löschen (statt Name oder ID)."
+        },
+        "config_entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Nur bei mehreren Waagen nötig."
+        }
+      }
+    }
+  },
+  "issues": {
+    "stop_switch_unavailable": {
+      "title": "Stopp-Schalter von {name} ist nicht verfügbar",
+      "description": "Der Auto-Stopp von {name} nutzt den Schalter `{entity_id}`, aber den gibt es nicht oder er ist nicht verfügbar, deshalb werden Bezüge nicht beim Ziel gestoppt. Mach den Schalter wieder verfügbar oder wähle einen anderen (oder keinen) unter Einstellungen > Geräte & Dienste > DiFluid Microbalance > Konfigurieren > Bezugserkennung und Stopp-Schalter. Diese Meldung verschwindet von selbst, sobald der Schalter wieder da ist."
     }
   }
 }

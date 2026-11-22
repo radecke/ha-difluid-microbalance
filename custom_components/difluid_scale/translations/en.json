@@ -127,6 +127,9 @@
           },
           "dose": {
             "name": "Dose"
+          },
+          "bean": {
+            "name": "Bean"
           }
         }
       }
@@ -170,6 +173,55 @@
             }
           }
         }
+      },
+      "auto_stop": {
+        "name": "Auto-stop",
+        "state_attributes": {
+          "event_type": {
+            "name": "Event type",
+            "state": {
+              "cut": "Switched off",
+              "switch_failed": "Switch failed",
+              "learned": "Learned",
+              "outlier": "Outlier",
+              "not_settled": "Weight did not settle",
+              "brew_discarded": "Brew discarded",
+              "brew_truncated": "Brew truncated",
+              "cup_lifted": "Cup lifted before the drips settled"
+            }
+          },
+          "target": {
+            "name": "Target yield"
+          },
+          "target_source": {
+            "name": "Target source",
+            "state": {
+              "ratio": "Ratio × dose",
+              "yield": "Fixed target yield"
+            }
+          },
+          "dose": {
+            "name": "Dose"
+          },
+          "cut_weight": {
+            "name": "Weight at cut"
+          },
+          "cut_flow": {
+            "name": "Flow at cut"
+          },
+          "predicted_overshoot": {
+            "name": "Predicted overshoot"
+          },
+          "final_yield": {
+            "name": "Settled yield"
+          },
+          "deviation": {
+            "name": "Deviation"
+          },
+          "bean": {
+            "name": "Bean"
+          }
+        }
       }
     },
     "switch": {
@@ -190,6 +242,12 @@
           "gram": "Gram",
           "ounce": "Ounce",
           "gering": "Gering"
+        }
+      },
+      "bean": {
+        "name": "Bean",
+        "state": {
+          "none": "None"
         }
       }
     },
@@ -226,15 +284,64 @@
     },
     "cut_outside_profile": {
       "message": "The brew's profile has no point at or before {cut_offset} s (or the brew has no yield)."
+    },
+    "bean_entry_unknown": {
+      "message": "No loaded DiFluid scale with config entry {config_entry_id}."
+    },
+    "bean_entry_ambiguous": {
+      "message": "Several DiFluid scales are set up; choose one with config_entry_id."
+    },
+    "bean_name_empty": {
+      "message": "Enter a name for the bean."
+    },
+    "bean_name_taken": {
+      "message": "A bean called “{name}” already exists."
+    },
+    "bean_ratio_range": {
+      "message": "The target ratio {ratio} is outside {min}–{max}."
+    },
+    "bean_ratio_missing": {
+      "message": "No ratio given and the current target ratio ({ratio}) is outside {min}–{max}; pass a ratio."
+    },
+    "bean_unknown": {
+      "message": "No bean profile “{bean}”."
+    },
+    "bean_none_active": {
+      "message": "No bean given and no bean is active."
+    },
+    "bean_name_reserved": {
+      "message": "“{name}” is reserved for “no bean” (or an unknown value)."
+    },
+    "bean_name_too_long": {
+      "message": "The bean name is longer than {max} characters."
+    },
+    "bean_no_scale": {
+      "message": "No DiFluid scale is loaded."
+    },
+    "bean_delete_which": {
+      "message": "Give exactly one of: name, bean_id, or active: true."
+    },
+    "bean_required": {
+      "message": "Choose one of the beans; “none” is only available while there are no bean profiles."
     }
   },
   "options": {
     "step": {
       "init": {
+        "title": "Options",
+        "description": "Brew detection and the auto-stop switch, or the bean profiles. A bean profile stores a target ratio per bean: choose the bean with the entity 'Bean' and the target ratio follows; changing 'Target ratio' while a bean is active updates its profile.",
+        "menu_options": {
+          "detection": "Brew detection and stop switch",
+          "add_bean": "Add bean profile",
+          "edit_bean": "Edit bean profile",
+          "delete_bean": "Delete bean profile"
+        }
+      },
+      "detection": {
         "title": "Brew detection",
-        "description": "A brew is the time the scale's timer runs, plus a short capture tail for the drips. The dose is detected automatically from weighing the beans before the brew. All values below have sensible defaults; change them only if brews are missed, split, or saved with a wrong dose. Optional: a stop switch for the adaptive auto-stop.",
+        "description": "A brew is the time the scale's timer runs, plus a short capture tail for the drips. The dose is detected automatically from weighing the beans before the brew. All values below have sensible defaults; change them only if brews are missed, split, or saved with a wrong dose. Optional: a stop switch for the adaptive auto-stop. Bean profiles are in their own menu entries.",
         "data": {
-          "tail_seconds": "Capture tail after timer stop",
+          "tail_seconds": "Extra weighing after the weight is calm",
           "min_duration": "Minimum brew duration",
           "min_yield": "Minimum yield",
           "dose_min": "Dose range minimum",
@@ -245,7 +352,7 @@
           "stop_switch": "Stop switch"
         },
         "data_description": {
-          "tail_seconds": "After the scale's timer stops, recording continues for this long so the drips still count towards the yield and the brew curve. Lifting the cup ends it early. With the auto-stop the timer is only stopped once the weight has settled, so the default of 3 s is enough.",
+          "tail_seconds": "With the auto-stop: after the cut the scale's timer keeps running until the weight is calm, then this much longer for late drops; then the timer is stopped and the weight at that moment is the yield (and what the auto-stop learns from). Lifting the cup ends it at once. Without the auto-stop (timer stopped by hand or by the scale) recording also goes on for this long after the timer stop, but the paused scale sends no weight, so drops after the stop are not counted: stop the timer only once the drips are in.",
           "min_duration": "Timer runs shorter than this are not saved as brews, e.g. a quick flush or an accidental timer start.",
           "min_yield": "Runs that end with less than this in the cup are not saved as brews, e.g. the timer ran without coffee.",
           "dose_min": "How the dose is found: put the dosing cup or portafilter on the scale, tare, add the beans. The last weight that stays stable inside this range before the brew counts as the dose. Set the range around your usual dose (default 12–25 g).",
@@ -255,10 +362,59 @@
           "dose_lookback_minutes": "Only weight plateaus this recent before the brew can become its dose; older ones are ignored.",
           "stop_switch": "Optional. A switch that ends the shot when turned off, usually the smart plug of the espresso machine. During a brew the integration turns it off early enough that the cup ends on the target once the drips have settled, and learns the machine's delay and drip from every shot. Set the target with the entities 'Target ratio' (ratio × detected dose) or 'Target yield' (fixed grams, also used when no dose was detected). Leave empty to disable the auto-stop."
         }
+      },
+      "add_bean": {
+        "title": "Add bean profile",
+        "description": "A bean profile remembers the target ratio for one coffee. The auto-stop keeps learning one shared model for all beans; the bean only labels the brews.",
+        "data": {
+          "name": "Name",
+          "ratio": "Target ratio",
+          "note": "Note"
+        },
+        "data_description": {
+          "name": "Shown in the entity 'Bean', in the brew card and saved with every brew made while it is active. Must be unique.",
+          "ratio": "Yield / dose for this bean, e.g. 2.0 for 18 g in, 36 g out. Selecting the bean sets the target ratio of the auto-stop to it.",
+          "note": "Optional, for yourself (roaster, roast date, grind setting)."
+        }
+      },
+      "edit_bean": {
+        "title": "Edit bean profile",
+        "description": "Choose the bean profile to change.",
+        "data": {
+          "id": "Bean"
+        }
+      },
+      "edit_bean_details": {
+        "title": "Edit {name}",
+        "description": "Stored brews keep the name they were saved with.",
+        "data": {
+          "name": "Name",
+          "ratio": "Target ratio",
+          "note": "Note"
+        },
+        "data_description": {
+          "name": "Shown in the entity 'Bean', in the brew card and saved with every brew made while it is active. Must be unique.",
+          "ratio": "Yield / dose for this bean, e.g. 2.0 for 18 g in, 36 g out. Selecting the bean sets the target ratio of the auto-stop to it.",
+          "note": "Optional, for yourself (roaster, roast date, grind setting)."
+        }
+      },
+      "delete_bean": {
+        "title": "Delete bean profile",
+        "description": "Stored brews keep the bean name. If the deleted bean is active, the newest remaining bean becomes active and its ratio the target; after the last one no bean is active (the target ratio stays).",
+        "data": {
+          "id": "Bean"
+        }
       }
     },
     "error": {
-      "dose_range": "Dose range minimum must be lower than the maximum."
+      "dose_range": "Dose range minimum must be lower than the maximum.",
+      "bean_name_empty": "Enter a name.",
+      "bean_name_taken": "A bean with this name already exists.",
+      "bean_name_reserved": "This name is reserved (“no bean”, unknown, unavailable).",
+      "bean_name_too_long": "At most 60 characters."
+    },
+    "abort": {
+      "unknown_bean": "The bean profile no longer exists."
     }
   },
   "services": {
@@ -305,6 +461,60 @@
           "description": "Optional: target of that brew; only used for the deviation in the response."
         }
       }
+    },
+    "add_bean": {
+      "name": "Add bean profile",
+      "description": "Adds a bean profile (name, target ratio, note) like the options do, without reloading the integration; usable from a dashboard.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name of the bean; unique (case-insensitive), at most 60 characters, not “none”/“Keine”/“unknown”/“unavailable”."
+        },
+        "ratio": {
+          "name": "Target ratio",
+          "description": "Yield / dose, 0.5–5. Empty: the current target ratio of the scale."
+        },
+        "note": {
+          "name": "Note",
+          "description": "Optional, e.g. roaster or grind setting."
+        },
+        "activate": {
+          "name": "Activate",
+          "description": "Make it the active bean right away, so the target ratio follows (default: on). The first bean is always activated."
+        },
+        "config_entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Only needed with more than one scale."
+        }
+      }
+    },
+    "delete_bean": {
+      "name": "Delete bean profile",
+      "description": "Deletes a bean profile: by name, by ID, or the active bean with active: true (exactly one of them). Stored brews keep the bean name; if it was the active bean, the newest remaining bean becomes active (its ratio applies); after the last one none is active and the target ratio stays.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Name of the bean (case-insensitive)."
+        },
+        "bean_id": {
+          "name": "Bean ID",
+          "description": "ID of the bean profile (instead of the name)."
+        },
+        "active": {
+          "name": "Active bean",
+          "description": "Delete the active bean (instead of name or ID)."
+        },
+        "config_entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Only needed with more than one scale."
+        }
+      }
+    }
+  },
+  "issues": {
+    "stop_switch_unavailable": {
+      "title": "Stop switch of {name} is not available",
+      "description": "The auto-stop of {name} uses the switch `{entity_id}`, but it does not exist or is unavailable, so brews are not stopped at the target. Make the switch available again or choose another one (or none) under Settings > Devices & services > DiFluid Microbalance > Configure > Brew detection and stop switch. This message disappears by itself once the switch is back."
     }
   }
 }

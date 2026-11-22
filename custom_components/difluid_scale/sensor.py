@@ -95,8 +95,9 @@ SENSORS: tuple[DifluidSensorEntityDescription, ...] = (
         key="timer",
         translation_key="timer",
         # Raw "Time" field (data6-7). DiFluid does not document its unit, so it
-        # is exposed unitless until verified against the scale's display.
-        state_class=SensorStateClass.MEASUREMENT,
+        # is exposed unitless until verified against the scale's display. No
+        # state class: a counter that resets every brew is no measurement
+        # worth long-term statistics.
         value_fn=lambda d: d.sensor.timer if d.sensor else None,
     ),
     DifluidSensorEntityDescription(

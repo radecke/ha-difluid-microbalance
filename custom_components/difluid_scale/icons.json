@@ -1,10 +1,46 @@
 {
+  "entity": {
+    "button": {
+      "reset_stop_learning": {
+        "default": "mdi:restore"
+      }
+    },
+    "event": {
+      "auto_stop": {
+        "default": "mdi:stop-circle-outline"
+      }
+    },
+    "number": {
+      "target_ratio": {
+        "default": "mdi:scale-balance"
+      },
+      "target_yield": {
+        "default": "mdi:target"
+      }
+    },
+    "select": {
+      "bean": {
+        "default": "mdi:seed-outline"
+      }
+    },
+    "switch": {
+      "brew_ready": {
+        "default": "mdi:coffee-outline"
+      }
+    }
+  },
   "services": {
     "delete_brew": {
       "service": "mdi:delete"
     },
     "learn_stop_from_brew": {
       "service": "mdi:school"
+    },
+    "add_bean": {
+      "service": "mdi:seed-plus-outline"
+    },
+    "delete_bean": {
+      "service": "mdi:seed-off-outline"
     }
   }
 }

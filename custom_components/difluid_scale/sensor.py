@@ -211,6 +211,18 @@ STOP_SENSORS: tuple[DifluidStopSensorEntityDescription, ...] = (
         value_fn=lambda s: round(s.model.tau, 3),
     ),
     DifluidStopSensorEntityDescription(
+        key="stop_switch_latency",
+        translation_key="stop_switch_latency",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        # Last cut: turn_off call -> switch reported off; unknown when that
+        # cut's latency could not be measured.
+        value_fn=lambda s: s.last_switch_latency,
+    ),
+    DifluidStopSensorEntityDescription(
         key="stop_drip",
         translation_key="stop_drip",
         device_class=SensorDeviceClass.WEIGHT,
@@ -301,7 +313,23 @@ class DifluidStopSensor(DifluidStopEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Deviation only: the last cut brew (cut, prediction, settled yield)."""
+        """Deviation: the last cut brew (cut, prediction, settled yield);
+        switch latency: the nominal latency and how many cuts it is from;
+        samples: how many of them are in the learning journal (can be taken
+        out by deleting their brew) and how many are older (folded in, or
+        learned before the journal existed). Both add up to the count unless
+        damaged journal entries were dropped on load."""
+        stop = self.coordinator.autostop
+        if self.entity_description.key == "stop_samples":
+            return {
+                "journal_samples": len(stop.journal),
+                "journal_base_samples": stop.journal.base.count,
+            }
+        if self.entity_description.key == "stop_switch_latency":
+            return {
+                "nominal_switch_latency": round(stop.nominal_switch_latency, 3),
+                "measurements": len(stop.latencies.values),
+            }
         if self.entity_description.key != "stop_deviation":
             return None
         last = self.coordinator.autostop.last

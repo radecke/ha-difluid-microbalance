@@ -48,6 +48,15 @@ learn_stop_from_brew:
           step: 0.1
           unit_of_measurement: g
           mode: box
+    switch_latency:
+      example: 0.459
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.001
+          unit_of_measurement: s
+          mode: box
 
 add_bean:
   fields:

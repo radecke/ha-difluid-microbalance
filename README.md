@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="custom_components/difluid_scale/brand/dark_logo@2x.png">
-    <img alt="DiFluid Microbalance" src="custom_components/difluid_scale/brand/logo@2x.png" width="412">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/radecke/ha-difluid-microbalance/main/custom_components/difluid_scale/brand/dark_logo@2x.png">
+    <img alt="DiFluid Microbalance" src="https://raw.githubusercontent.com/radecke/ha-difluid-microbalance/main/custom_components/difluid_scale/brand/logo@2x.png" width="412">
   </picture>
 </p>
 
@@ -12,9 +12,9 @@ It shows weight, flow rate, brew timer and battery live, and lets you tare and c
 It also records every brew automatically: dose, yield, ratio, brew time and the full flow profile, with sensors for the latest brew
 and running totals (brew count, coffee ground). Each brew gets shot metrics (time to first drop, peak flow, mean flow and its variation)
 and fires an event for your own automations.
-A bundled dashboard card draws the flow curve live while you brew, shows each brew's target, bean and metrics, lets you browse and replay the last 20 brews, and can expand to full screen (animated) while a brew is prepared or running.
+A bundled dashboard card draws the flow curve live while you brew, adds a calm smoothed flow line to stored brews, shows each brew's target, bean and metrics, lets you browse, replay and delete the last 20 brews, and can expand to full screen (animated) while a brew is prepared or running.
 A "Prepare brew" switch puts the card into a ready view before the brew, with empty axes and the weighed dose.
-An adaptive auto-stop switches the espresso machine (any switch, e.g. its smart plug) off early enough that the cup ends on a target brew ratio (ratio × the weighed dose) or a target yield, and learns its timing from every shot, ignoring single broken weight samples; every attempt is reported on an event entity, and a repair issue warns when the stop switch is missing or unavailable.
+An adaptive auto-stop switches the espresso machine (any switch, e.g. its smart plug) off early enough that the cup ends on a target brew ratio (ratio × the weighed dose) or a target yield, and learns its timing from every shot, ignoring single broken weight samples. It measures how long the stop switch takes to report off on every cut and corrects the learning for it, and deleting a brew takes it out of the learning again; every attempt is reported on an event entity, and repair issues warn when the stop switch is missing, unavailable or does not report off in time.
 Bean profiles keep a target ratio per coffee: pick the bean and the target follows, and every brew remembers its bean.
 Diagnostics (options, learned model, device, recent brews) can be downloaded from the integration page, and stores from older versions are migrated on the first start.
 
@@ -40,7 +40,7 @@ Tested with model `DFT-S101`, firmware `V320` and `V326`.
 
 Brew entities (last dose, yield, ratio, brew duration, brew count, coffee ground total, dose correction, prepare brew): see [Brew detection and brew card](#brew-detection-and-brew-card-030) below.
 
-Auto-stop entities (target ratio, target yield, learned latency and drip, learning samples, deviation, auto-stop event, reset) and the services `delete_brew` and `learn_stop_from_brew`: see [Auto-stop at target ratio or yield](#auto-stop-at-target-ratio-or-yield-040) below.
+Auto-stop entities (target ratio, target yield, learned latency and drip, last switch latency, learning samples, deviation, auto-stop event, reset) and the services `delete_brew` and `learn_stop_from_brew`: see [Auto-stop at target ratio or yield](#auto-stop-at-target-ratio-or-yield-040) below.
 
 Bean select: see [Bean profiles](#bean-profiles-050) below.
 
@@ -87,11 +87,11 @@ The flow is the one the brew card draws by default (`flow_smoothing: 3`): the we
 The integration ships a Lovelace card and registers it as a dashboard resource automatically (storage mode). It plots the **flow rate** of a brew over time, with the weight as a second curve, and lets you browse the stored brews.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/brew-card-dark.png">
-  <img alt="Brew card showing a real espresso: 16.0 g dose, 44.2 g yield (target 44.8 g), ratio 1:2.76, 25.5 s, with bean and shot metrics" src="docs/brew-card-light.png" width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/radecke/ha-difluid-microbalance/main/docs/brew-card-dark.png">
+  <img alt="Brew card showing a real espresso: 16.0 g dose, 41.5 g yield (target 41.6 g), ratio 1:2.59, 24.1 s, with bean, shot metrics and the smoothed flow line" src="https://raw.githubusercontent.com/radecke/ha-difluid-microbalance/main/docs/brew-card-light.png" width="720">
 </picture>
 
-<sub>A real brew recorded by the integration with the auto-stop (default <code>flow_smoothing: 3</code>): 16.0 g dose, 44.2 g yield, 25.5 s.</sub>
+<sub>A real brew recorded by the integration with the auto-stop (default <code>flow_smoothing: 3</code>): 16.0 g dose, 41.5 g yield, 24.1 s.</sub>
 
 ```yaml
 type: custom:difluid-brew-card
@@ -110,13 +110,19 @@ flow_smoothing: 3                     # optional: seconds (0–10), 0 = raw scal
 
 **Flow smoothing (0.3.1):** the scale's own flow value lags the weight by 1–1.5 s (it is a trailing regression over about 3 s), and the weight jumps back by up to a few grams after upward jumps during a brew. With `flow_smoothing` (seconds, default `3`) the card computes the flow curve from the weight instead: the weight may only rise (a drop is ignored, the last maximum is held), and the flow at each point is the slope of that weight over the preceding `flow_smoothing` seconds. Before the weight first rises by more than 1 g the flow is 0. Only earlier readings are used, so in live mode a point once drawn never changes. The dashed weight curve, the hover readout and the live flow and weight figures use these values; the axes grow with them. `0` shows the scale's raw flow and weight as before. The stored profiles and the `Flow rate` sensor are not changed. Values outside 0–10 are rejected with an error in the card editor.
 
+**Smoothed flow (0.5.1):** a stored brew also gets a second, calm flow line (dotted, "Smoothed flow" in the legend; the hover readout adds its value as `(Ø 2.1)`). Since the whole brew is known, it is centred rather than trailing: single outlier frames are replaced, the weight is fitted non-decreasing, and the flow is the slope of a Gaussian-weighted local fit (σ 2.5 s). It spans the brew from the first drop to the brew end (auto-stop cut, else timer stop), so the drips after the cut do not pull it down. Not shown live, in the ready view or during a replay.
+
 **Detail line (0.5.0):** under the date of a stored brew the card shows its bean and metrics, e.g. `Kenya · first drop 8.8 s · peak flow 3.3 g/s · Ø 2.8 g/s ±19 %`; parts that are not known are left out. The line keeps its space during a live brew, so the card does not jump when the brew ends.
 
 **Target (0.5.0):** with the auto-stop on, the card shows the brew's target in small text, e.g. `target 40.0 g`: under the yield of a stored brew, under the weight during a live brew and in the ready view (the target the next brew would get, ratio × the weighed dose or the fixed target yield; it follows changes of the target at once). Nothing is shown while the auto-stop is off and for brews saved before 0.5.0. Each brew stores `target` (g) and `target_source` (`ratio` or `yield`, both null with the auto-stop off): the target the auto-stop cut at if it fired, otherwise the target shown live (ratio × the brew's dose, or the fixed target yield, at the end of the brew). It records what was aimed at: it stays when the dose is corrected later or the auto-stop is turned off afterwards.
 
+**Switch latency (0.5.1):** each brew stored since 0.5.1 has `switch_latency`: seconds from the auto-stop's `turn_off` call until the stop switch reported `off` (null without a cut). A cut whose latency could not be measured is marked `switch_latency_unknown: true`. Brews saved before 0.5.1 have neither key.
+
 **Ratio:** stored brews show the ratio with two decimals (`1:2.43`), as saved.
 
 **Replay:** the play button next to the brew navigation plays a stored brew back in real time, exactly like a live brew (curves building up, growing axes, time, flow and weight). The stop button ends it early; a brew that starts in the meantime takes over the card.
+
+**Delete (0.5.1):** the bin icon next to the navigation of a stored brew deletes that brew after a confirmation in the card ("Delete the brew of Nov 23, 07:47 PM?", in German "Bezug vom 23.11. 19:47 löschen?"; for a brew the auto-stop learned from, followed by "It is also removed from the auto-stop learning."); the card then shows the next older brew (or the newer one if it was the oldest). The icon is not shown in the live view, the ready view or during a replay. Same as the `delete_brew` service; the totals are not reduced.
 
 #### Ready mode (0.3.1)
 
@@ -151,8 +157,8 @@ For your own frontends (all commands accept an optional `entry_id` or `device_id
 
 | Command | Result |
 |---|---|
-| `difluid_scale/brews` | Brew summaries (no profiles), newest first; each with `bean`, `target`, `target_source` and `metrics` |
-| `difluid_scale/brew` | One brew including its profile, `bean` and `metrics` (`brew_id`, default newest) |
+| `difluid_scale/brews` | Brew summaries (no profiles), newest first; each with `bean`, `target`, `target_source`, `metrics` and `learned` (true: its sample is in the auto-stop learning journal, see below) |
+| `difluid_scale/brew` | One brew including its profile, `bean`, `metrics` and `learned` (`brew_id`, default newest) |
 | `difluid_scale/subscribe_brews` | Event with the newest brew summary whenever a brew is saved or its dose corrected |
 | `difluid_scale/subscribe_live` | Live data of the running brew (below) |
 
@@ -168,7 +174,7 @@ Points are `[seconds since start, weight g, flow g/s]`. Current values: `weight`
 
 ### Tests
 
-`python3 tests/test_brew.py` runs the brew detection tests and `python3 tests/test_stop_model.py` the auto-stop model tests without Home Assistant. The full suite needs the Home Assistant test helpers: `pytest-homeassistant-custom-component` up to Home Assistant 2026.10, `pytest-homeassistant` (same version as Home Assistant) from 2026.11 on; then `pytest` from the repository root. It is run against the minimum version from `hacs.json` and the current release. Its fixtures in `tests/fixtures` are copies of real stores (brews with profiles, the learned model, the restored targets). `node tests/card_retry_test.mjs` tests the card's reconnect handling, `node tests/card_flow_test.mjs` the flow smoothing and the ready view, `node tests/card_expand_test.mjs` the expansion while active (all three also run by `pytest` when node is installed).
+`python3 tests/test_brew.py` runs the brew detection tests and `python3 tests/test_stop_model.py` the auto-stop model tests without Home Assistant. The full suite needs the Home Assistant test helpers: `pytest-homeassistant-custom-component` up to Home Assistant 2026.10, `pytest-homeassistant` (same version as Home Assistant) from 2026.11 on; then `pytest` from the repository root. It is run against the minimum version from `hacs.json` and the current release. Its fixtures in `tests/fixtures` are copies of real stores (brews with profiles, the learned model, the restored targets). `node tests/card_retry_test.mjs` tests the card's reconnect handling, `node tests/card_flow_test.mjs` the flow smoothing, the smoothed flow line, the ready view and deleting a brew, `node tests/card_expand_test.mjs` the expansion while active (all three also run by `pytest` when node is installed).
 
 ## Auto-stop at target ratio or yield (0.4.0)
 
@@ -178,12 +184,13 @@ Set a **target ratio** (e.g. 2.5, yield ÷ dose) and/or a **target yield**, and 
 |---|---|
 | Target ratio | Number, 0–5 (0 = off). With a dose detected for the running brew the target is ratio × dose; without one the target yield applies. With a [bean](#bean-profiles-050) active, a new ratio is written to its profile. |
 | Target yield | Number, 0–100 g (0 = off). The target when no ratio is set, and the fallback for brews without a detected dose. |
-| Stop latency | Learned `tau` in seconds (diagnostic) |
+| Learned stop latency | Learned `tau` in seconds (diagnostic); includes the nominal stop switch latency. Entity ID unchanged (`…_stop_latency`) on existing installs |
+| Last switch latency | Last auto-stop: seconds from the `turn_off` call until the stop switch reported `off` (unknown: no report within 5 s, switch `off` or unavailable at the cut, or the call failed). After 3 auto-stops in a row without an `off` report in time a repair issue appears (nothing is learned from them); it clears at the next measured latency. Attributes: `nominal_switch_latency` (median of the last 15 measurements, 0.07 s until 3 are known), `measurements` (diagnostic) |
 | Stop drip | Learned `c` in grams (diagnostic) |
-| Stop learning samples | Number of shots the model has learned from (diagnostic) |
-| Stop deviation | Settled yield − target of the last auto-stopped shot. Attributes: `target`, `target_source` (`ratio` or `yield`), `dose`, `cut_weight`, `cut_flow`, `predicted_overshoot`, `lead`, `final_yield`, `overshoot`, `accepted`, `reason` (`outlier`, `not_settled`, `cup_lifted`, `brew_discarded`, `brew_truncated`) |
-| Auto-stop | Event entity, one event per step of an auto-stop: `cut` (switch turned off) or `switch_failed` (the call failed or the switch is missing or unavailable; reported only, the shot is handled as usual), then how it ended: `learned`, `outlier`, `not_settled`, `cup_lifted`, `brew_discarded`, `brew_truncated`. Attributes: `target`, `target_source`, `dose`, `cut_weight`, `cut_flow`, `predicted_overshoot`, `final_yield` and `deviation` (once known), `bean` |
-| Reset stop learning | Button: back to the starting values |
+| Stop learning samples | Number of shots the model has learned from (diagnostic). Attributes: `journal_samples` (of those, the ones in the learning journal, which deleting their brew takes out again) and `journal_base_samples` (older ones; both add up to the state) |
+| Stop deviation | Settled yield − target of the last auto-stopped shot. Attributes: `target`, `target_source` (`ratio` or `yield`), `dose`, `cut_weight`, `cut_flow`, `predicted_overshoot`, `lead`, `final_yield`, `overshoot`, `accepted`, `reason` (`outlier`, `not_settled`, `cup_lifted`, `brew_discarded`, `brew_truncated`, `switch_latency_unknown`), `switch_latency`, `nominal_switch_latency`, `adjusted_overshoot` (the learned value: overshoot − flow × (switch latency − nominal)) |
+| Auto-stop | Event entity, one event per step of an auto-stop: `cut` (switch turned off) or `switch_failed` (the call failed or the switch is missing or unavailable; reported only, the shot is handled as usual), then how it ended: `learned`, `outlier`, `not_settled`, `cup_lifted`, `brew_discarded`, `brew_truncated`, `switch_latency_unknown` (the switch did not report `off` within 5 s, was not `on`, or the call failed: not learned). Attributes: `target`, `target_source`, `dose`, `cut_weight`, `cut_flow`, `predicted_overshoot`, `final_yield` and `deviation` (once known), `bean`; on the conclusion events also `switch_latency` (the `cut` event fires when the call returns, usually before the switch reports) |
+| Reset stop learning | Button: back to the starting values (also empties the learning journal) |
 
 Both targets are kept by the integration (with the learned model), so the auto-stop keeps its target when a target entity is disabled; 0.5.0 takes over the values the entities had before. A **repair issue** reports a stop switch that cannot be used: one that does not exist (checked when Home Assistant has started; a switch that is only briefly unavailable or a placeholder then does not count), one that is or becomes unavailable while Home Assistant runs (also checked when the options change or the integration is reloaded), and one that is missing or unavailable at a cut. It disappears once the switch is back or the option is emptied.
 
@@ -195,6 +202,8 @@ and then turns the switch off (once per brew; the sample handler does not wait f
 
 If the brew was saved normally, the shot is one learning sample: `x` = flow at the cut, `y` = final weight (at the timer stop above; before the lift if the cup was lifted after the weight was calm) − weight at the cut. A shot whose weight never calmed down within the 20 s is not learned (its saved yield still includes everything up to the timer stop). Since 0.5.0 the overshoot also includes late drops, so the first shots after updating from 0.4.x may land about one drop above the target until the model has caught up. `tau` and `c` are fitted by recursive least squares with a forgetting factor of 0.93 (roughly the last 14 shots count), starting from `tau` = 1.0 s and `c` = 0.3 g. The first three samples only adjust `tau` (`c` stays at 0.3 g, since the first shots rarely differ enough in flow to separate the two); both are fitted from the fourth on. `tau` stays within 0–3 s, `c` within −0.5–3 g. Shots with an overshoot outside 0–5 g (cup bumped or lifted), with a flow at the cut above 8 g/s, or with a dropped sample (or a confirmed weight jump) within the 2 s before the cut (reported as `outlier`), discarded or truncated brews, and shots stopped any other way are not learned. A weight more than 5 g above the target, or one that is already past the threshold when the brew starts, never triggers a cut (a cup that was not tared).
 
+**Learning journal (0.5.1).** Every accepted sample (flow at the cut, the overshoot actually learned, the brew it came from) is kept in a journal of the last 50 samples, stored with the model. Deleting a brew (card or `delete_brew`) drops its sample and recomputes the model: starting from the model before the journal's first sample, all remaining samples are fed through the same update in their order. Without a deletion this gives exactly the model learned shot by shot. Samples older than the last 50 are folded into that starting model and can no longer be taken out; with the forgetting factor their weight is below 0.93^50 ≈ 2.6 %. A model learned before 0.5.1 is kept as it is; its journal starts empty, so deleting one of those older brews leaves the model unchanged.
+
 Notes: the learned model is stored per scale and removed with the integration. It is one model for all beans; the bean is stored with each brew for your own analysis only. Because the timer keeps running until the weight is calm plus `tail_seconds`, the saved brew's yield includes the drips; the brew time ends at the cut. "Prepare brew" is not needed for the auto-stop.
 
 ### Services
@@ -203,12 +212,12 @@ Notes: the learned model is stored per scale and removed with the integration. I
 
 | Service | Fields | Effect |
 |---|---|---|
-| `difluid_scale.delete_brew` | `brew_id` | Removes a saved brew. Brew count goes down by 1 and coffee ground total by the dose that brew had added; sensors and the card update. No brew-completed event. |
-| `difluid_scale.learn_stop_from_brew` | `brew_id`, `cut_offset` (s since the brew start), `target` (optional) | Teaches the auto-stop from a past brew, e.g. one stopped by an earlier automation. The profile point at or just before `cut_offset` is the cut: its weight, and the flow computed the same way as live (same sample filter). Learning sample: saved yield − that weight, with the same acceptance checks as a live shot. Returns the sample (`weight_at_cut`, `flow_at_cut`, `clean_cut` (false: a sample was dropped within 2 s before the cut, not learned), `overshoot`, `accepted`, the model after the update, and `deviation` if `target` is given). |
+| `difluid_scale.delete_brew` | `brew_id` | Removes a saved brew and takes its learning sample out of the auto-stop: the model is recomputed from the remaining samples (see *Learning journal* above). Brew count and coffee ground total stay as they are (since 0.5.1; they count every brew made). The card and the sensors update. No brew-completed event. A brew that is still running (continued after a pause) or whose auto-stop result is still pending cannot be deleted. Returns `brew_id`, `removed_from_learning` (false: the brew was not in the learning journal, the model is unchanged) and the `model` (`tau`, `c`, `count`) afterwards. |
+| `difluid_scale.learn_stop_from_brew` | `brew_id`, `cut_offset` (s since the brew start), `target` (optional), `switch_latency` (optional, s; overrides the latency stored with the brew; needed to learn a brew marked `switch_latency_unknown`) | Teaches the auto-stop from a past brew, e.g. one stopped by an earlier automation. The profile point at or just before `cut_offset` is the cut: its weight, and the flow computed the same way as live (same sample filter). Learning sample: saved yield − that weight, with the same acceptance checks as a live shot. Returns the sample (`weight_at_cut`, `flow_at_cut`, `clean_cut` (false: a sample was dropped within 2 s before the cut, not learned), `overshoot`, `switch_latency`, `adjusted_overshoot` (corrected to the nominal switch latency when a latency is known; brews from before 0.5.1, never measured, are learned uncorrected; a brew whose measurement ended without a value is not learned, reason `switch_latency_unknown`), `accepted`, the model after the update, and `deviation` if `target` is given). A brew whose sample is still in the learning journal (learned live or by this service, within the last 50 samples) has its sample replaced, not counted twice; an older one, or one learned before 0.5.1, is counted again. While the brew's own auto-stop result is still pending the call is refused. |
 | `difluid_scale.add_bean` | `name`, `ratio` (optional, 0.5–5; default: the current target ratio), `note` (optional), `activate` (optional, default true) | Adds a [bean profile](#bean-profiles-050) exactly like the options do, without reloading the integration or touching a running brew. Same name rules as the options (unique, case-insensitive, at most 60 characters, not `none`/`Keine`/`unknown`/`unavailable`). With `activate` it becomes the active bean and the target ratio follows; the first bean always becomes active. Returns `bean_id`, `name`, `ratio`, `active`. |
 | `difluid_scale.delete_bean` | exactly one of `name`, `bean_id`, `active: true` | Deletes a bean profile by name (case-insensitive), by id, or the active bean. Like a delete in the options: saved brews keep the name; if it was the active one, the newest remaining bean becomes active and its ratio the target; after the last bean none is active and the target ratio stays. Returns `bean_id`, `name`. |
 
-Note that `brew_count` and `coffee_total` are *total increasing* sensors: Home Assistant's long-term statistics read a decrease as a meter reset.
+Note that `brew_count` and `coffee_total` are *total increasing* sensors: Home Assistant's long-term statistics read a decrease as a meter reset. That is why deleting a brew no longer reduces them (up to 0.5.0 it did).
 
 ## Bean profiles (0.5.0)
 
@@ -259,9 +268,14 @@ cards:
 
 ## Diagnostics
 
-**Settings → Devices & services → DiFluid Microbalance → ⋮ → Download diagnostics** gives the options, the learned stop model (`tau`, `c`, covariance, sample count), the last auto-stop result, targets and bean profiles, device info and firmware, the connection state and the last five brews without their profiles. The Bluetooth address and the serial number are redacted.
+**Settings → Devices & services → DiFluid Microbalance → ⋮ → Download diagnostics** gives the options, the learned stop model (`tau`, `c`, covariance, sample count) with its learning journal, the measured switch latencies, the last auto-stop result, targets and bean profiles, device info and firmware, the connection state and the last five brews without their profiles. The Bluetooth address and the serial number are redacted.
 
 A raw weight jump of 50 g or more between two readings is logged as a warning with the frame data and the last raw notifications, to track down broken frames.
+
+## Upgrading to 0.5.1
+
+- Deleting a brew no longer reduces the brew count and the coffee ground total.
+- The learned model is kept. Its learning journal starts empty, so deleting a brew learned before 0.5.1 leaves the model unchanged; the switch latency is measured from the first auto-stop on. The sensor "Stop latency" is now named "Learned stop latency" (entity ID unchanged).
 
 ## Upgrading to 0.5.0
 

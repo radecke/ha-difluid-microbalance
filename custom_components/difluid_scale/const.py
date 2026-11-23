@@ -66,6 +66,10 @@ DEFAULT_OPTIONS: Final[dict[str, float]] = {
 EVENT_BREW_COMPLETED: Final = f"{DOMAIN}_brew_completed"
 # Repair issue: the configured stop switch is missing or unavailable.
 ISSUE_STOP_SWITCH: Final = "stop_switch_unavailable"
+# The stop switch did not report ``off`` in time at this many auto-stop cuts
+# in a row: their latency is unknown, so nothing is learned (repair issue).
+ISSUE_SWITCH_LATENCY: Final = "stop_switch_latency_unknown"
+SWITCH_LATENCY_ISSUE_STREAK: Final = 3
 SIGNAL_BREWS_UPDATED: Final = f"{DOMAIN}_brews_updated_{{}}"  # .format(entry_id)
 SIGNAL_LIVE: Final = f"{DOMAIN}_live_{{}}"  # .format(entry_id)
 

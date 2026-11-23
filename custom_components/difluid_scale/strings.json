@@ -73,13 +73,32 @@
         "name": "Coffee ground total"
       },
       "stop_latency": {
-        "name": "Stop latency"
+        "name": "Learned stop latency"
+      },
+      "stop_switch_latency": {
+        "name": "Last switch latency",
+        "state_attributes": {
+          "nominal_switch_latency": {
+            "name": "Nominal switch latency"
+          },
+          "measurements": {
+            "name": "Measurements"
+          }
+        }
       },
       "stop_drip": {
         "name": "Stop drip"
       },
       "stop_samples": {
-        "name": "Stop learning samples"
+        "name": "Stop learning samples",
+        "state_attributes": {
+          "journal_samples": {
+            "name": "Samples in the learning journal"
+          },
+          "journal_base_samples": {
+            "name": "Older samples"
+          }
+        }
       },
       "stop_deviation": {
         "name": "Stop deviation",
@@ -115,7 +134,8 @@
               "not_settled": "Weight did not settle",
               "brew_discarded": "Brew discarded",
               "brew_truncated": "Brew truncated",
-              "cup_lifted": "Cup lifted before the drips settled"
+              "cup_lifted": "Cup lifted before the drips settled",
+              "switch_latency_unknown": "Stop switch latency unknown"
             }
           },
           "target_source": {
@@ -130,6 +150,15 @@
           },
           "bean": {
             "name": "Bean"
+          },
+          "switch_latency": {
+            "name": "Switch latency"
+          },
+          "nominal_switch_latency": {
+            "name": "Nominal switch latency"
+          },
+          "adjusted_overshoot": {
+            "name": "Adjusted overshoot"
           }
         }
       }
@@ -187,7 +216,8 @@
               "not_settled": "Weight did not settle",
               "brew_discarded": "Brew discarded",
               "brew_truncated": "Brew truncated",
-              "cup_lifted": "Cup lifted before the drips settled"
+              "cup_lifted": "Cup lifted before the drips settled",
+              "switch_latency_unknown": "Stop switch latency unknown"
             }
           },
           "target": {
@@ -220,6 +250,9 @@
           },
           "bean": {
             "name": "Bean"
+          },
+          "switch_latency": {
+            "name": "Switch latency"
           }
         }
       }
@@ -281,6 +314,9 @@
     },
     "unknown_brew": {
       "message": "No stored brew with id {brew_id}."
+    },
+    "brew_busy": {
+      "message": "This brew is still running or its auto-stop result is pending; try again once it is finished."
     },
     "cut_outside_profile": {
       "message": "The brew's profile has no point at or before {cut_offset} s (or the brew has no yield)."
@@ -420,7 +456,7 @@
   "services": {
     "delete_brew": {
       "name": "Delete brew",
-      "description": "Removes a stored brew from the history; brew count and coffee total are reduced accordingly.",
+      "description": "Removes a stored brew from the history and takes its sample out of the auto-stop learning (the model is recomputed from the remaining samples). Brew count and coffee total are totals of all brews made and are not reduced. Returns the brew ID, whether it was in the learning and the model afterwards.",
       "fields": {
         "entry_id": {
           "name": "Scale",
@@ -438,7 +474,7 @@
     },
     "learn_stop_from_brew": {
       "name": "Learn stop from brew",
-      "description": "Feeds a past brew into the auto-stop model: weight and weight-derived flow at the cut time from the stored profile, overshoot = stored yield - weight at cut. Same acceptance checks as a live sample. Returns the computed sample.",
+      "description": "Feeds a past brew into the auto-stop model: weight and weight-derived flow at the cut time from the stored profile, overshoot = stored yield - weight at cut. Same acceptance checks as a live sample. Returns the computed sample. If the brew's sample is still in the learning journal (the last 50 samples), it is replaced instead of counted twice.",
       "fields": {
         "entry_id": {
           "name": "Scale",
@@ -459,6 +495,10 @@
         "target": {
           "name": "Target yield",
           "description": "Optional: target of that brew; only used for the deviation in the response."
+        },
+        "switch_latency": {
+          "name": "Switch latency",
+          "description": "Optional: seconds from the turn_off call to the stop switch reporting off for that cut (e.g. from the recorder). Overrides the latency stored with the brew. With a latency the sample is corrected to the nominal switch latency like a live cut. A brew whose measurement ended without a value is not learned unless this is given; brews from before 0.5.1 (never measured) are learned uncorrected."
         }
       }
     },
@@ -515,6 +555,10 @@
     "stop_switch_unavailable": {
       "title": "Stop switch of {name} is not available",
       "description": "The auto-stop of {name} uses the switch `{entity_id}`, but it does not exist or is unavailable, so brews are not stopped at the target. Make the switch available again or choose another one (or none) under Settings > Devices & services > DiFluid Microbalance > Configure > Brew detection and stop switch. This message disappears by itself once the switch is back."
+    },
+    "stop_switch_latency_unknown": {
+      "title": "Stop switch of {name} does not report off in time",
+      "description": "The auto-stop of {name} turns off `{entity_id}`, but at the last {count} auto-stops in a row the switch did not report `off` within 5 seconds (or the call failed). Without that report the switch's delay cannot be separated from the drip, so these shots were not learned and the auto-stop no longer adapts. Check the switch's connection (e.g. Zigbee signal, MQTT reporting) or choose another switch under Settings > Devices & services > DiFluid Microbalance > Configure > Brew detection and stop switch. This message disappears by itself at the next auto-stop with a measured latency."
     }
   }
 }

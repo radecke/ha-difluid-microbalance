@@ -56,7 +56,17 @@ async def async_get_config_entry_diagnostics(
                 "p": model.p,
                 "count": model.count,
             },
+            "journal": {
+                "samples": len(autostop.journal),
+                "base_count": autostop.journal.base.count,
+                "entries": autostop.journal.entries,
+            },
             "last": autostop.last,
+            "switch_latency": {
+                "last": autostop.last_switch_latency,
+                "nominal": autostop.nominal_switch_latency,
+                **autostop.latencies.to_dict(),
+            },
         },
         "beans": autostop.beans,
         "brews": {

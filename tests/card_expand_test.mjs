@@ -109,7 +109,8 @@ class FakeShadowRoot {
     const els = {};
     for (const s of [".title-text", ".badge", ".badge-text", ".note", ".when", ".detail", ".nav", ".prev",
       ".replay", ".replay path", ".next", ".pos", ".message", ".stats", ".legend", ".chart", ".head",
-      ".backdrop"]) {
+      ".backdrop", ".delete", ".confirm", ".confirm-text", ".confirm-error", ".confirm-cancel",
+      ".confirm-ok"]) {
       els[s] = new FakeEl("div");
     }
     els[".stats"].isStats = true;

@@ -327,7 +327,8 @@ function makeCard(config = {}) {
   card._built = true;
   card._els = Object.fromEntries(
     ["title", "badge", "badgeText", "note", "when", "detail", "nav", "prev", "replay",
-     "replayIcon", "next", "pos", "message", "stats", "legend"].map((k) => [k, el()])
+     "replayIcon", "next", "pos", "message", "stats", "legend", "del", "confirm",
+     "confirmText", "confirmError", "confirmCancel", "confirmOk"].map((k) => [k, el()])
   );
   card._chartBox = el();
   card._renderChart = () => {};
@@ -393,6 +394,280 @@ function makeCard(config = {}) {
   const values = [...card._els.stats.innerHTML.matchAll(/class="value">([^<]*)/g)].map((m) => m[1]);
   assert.equal(values[0], "21.0");
   assert.equal(values[2], "38.4", "weighing goes on");
+  scenarios++;
+}
+
+// --- smoothed flow line of stored brews (trendFlow)
+{
+  const { trendFlow, despike, isotonic } = Card.math;
+  // 2.5 g/s from t=5 s, a +-0.6 g/s ~4 s wave in the weight, 4 points/s,
+  // one -197 g outlier frame, the cut at 25 s, then 5 s of dripping tail.
+  const pts = [];
+  for (let i = 0; i <= 120; i++) {
+    const t = i * 0.25;
+    let w = t < 5 ? 0 : t < 25 ? 2.5 * (t - 5) + 0.4 * Math.sin((2 * Math.PI * t) / 4) : 50 + 0.1 * (t - 25);
+    if (i === 60) w = -197.4;
+    pts.push([t, w, 0]);
+  }
+  const line = trendFlow(pts, 25);
+  assert.ok(line.length > 0);
+  assert.ok(line[line.length - 1][0] <= 25 && line[line.length - 1][0] >= 24.75, "ends at the cut");
+  assert.ok(line[0][0] > 5 && line[0][0] <= 5.75, `starts at the first drop: ${line[0][0]}`);
+  assert.ok(Math.abs(line[line.length - 1][1] - 2.5) < 0.4, `no dip at the cut: ${line[line.length - 1][1]}`);
+  const mid = line.filter((p) => p[0] >= 10 && p[0] <= 22).map((p) => p[1]);
+  assert.ok(Math.max(...mid) < 3.0 && Math.min(...mid) > 2.0, `calm around 2.5 g/s: ${Math.min(...mid)}..${Math.max(...mid)}`);
+  assert.ok(line.every((p) => p[1] >= 0), "never negative");
+  assert.ok(Math.max(...line.map((p) => p[1])) < 4, "the outlier frame leaves no spike");
+  // Raw causal flow over the same data does show the wave.
+  const raw = displayProfile(pts.filter((p) => p[0] <= 25), 3).filter((p) => p[0] >= 10 && p[0] <= 22).map((p) => p[2]);
+  assert.ok(std(mid) < std(raw) / 2, "smoother than the drawn flow");
+  assert.deepEqual(despike([0, 0, 9, 0, 0]), [0, 0, 0, 0, 0]);
+  assert.deepEqual(isotonic([1, 3, 2, 4]), [1, 2.5, 2.5, 4]);
+  assert.deepEqual(trendFlow([[0, 0, 0]], 10), [], "too few points: no line");
+  assert.deepEqual(despike([0, 2, 4, 6, 8]), [0, 2, 4, 6, 8], "a steep steady rise is no outlier, edges included");
+  assert.deepEqual(trendFlow([[0, 5, 0], [1, 5.2, 0], [2, 5.1, 0]], 5), [], "no flow: no line");
+  // Coarse spacing (thinned long brew): 4 g/s at 0.5 s steps keeps 4 g/s at the cut.
+  const coarse = [];
+  for (let t = 0; t <= 20; t += 0.5) coarse.push([t, 4 * t, 0]);
+  const cl = trendFlow(coarse, 20);
+  assert.ok(Math.abs(cl[cl.length - 1][1] - 4) < 0.05, `coarse end: ${cl[cl.length - 1][1]}`);
+  const noStop = trendFlow(pts, null);
+  assert.equal(noStop[noStop.length - 1][0], pts[pts.length - 1][0], "no stop: up to the last point");
+  scenarios++;
+}
+
+// 13. Delete a stored brew from the card: the bin only on stored brews (not
+//     live, ready or replay), a confirmation inside the card, cancel does
+//     nothing, confirm calls delete_brew and moves to the neighbour; errors
+//     stay visible in the card.
+{
+  process.env.TZ = "Europe/Berlin";
+  const stateful = () => {
+    const set = new Set();
+    return {
+      set,
+      toggle(c, f) { const on = f === undefined ? !set.has(c) : !!f; if (on) set.add(c); else set.delete(c); return on; },
+      add(c) { set.add(c); },
+      remove(c) { set.delete(c); },
+      contains(c) { return set.has(c); },
+    };
+  };
+  const el = () => ({ classList: stateful(), setAttribute() {}, style: {}, textContent: "", innerHTML: "", title: "", disabled: false, focus() {} });
+  const keys = ["title", "badge", "badgeText", "note", "when", "detail", "nav", "prev", "replay",
+    "replayIcon", "next", "pos", "message", "stats", "legend", "del", "confirm",
+    "confirmText", "confirmError", "confirmCancel", "confirmOk"];
+  const brewsOf = () => [
+    { id: "b3", start: "2026-11-23T19:30:00+00:00", dose: 18, yield: 40, ratio: 2.2, duration: 28 },
+    { id: "b2", start: "2026-11-23T18:47:10+00:00", dose: 18, yield: 39, ratio: 2.17, duration: 27, learned: true },
+    { id: "b1", start: "2026-11-22T07:05:00+00:00", dose: 18, yield: 38, ratio: 2.11, duration: 26 },
+  ];
+  const setup = (lang = "en") => {
+    const card = new Card();
+    card._built = true;
+    card._els = Object.fromEntries(keys.map((k) => [k, el()]));
+    card._chartBox = el();
+    card._renderChart = () => {};
+    card._renderLegend = () => {};
+    card.loads = [];
+    card._load = (keep) => card.loads.push(keep);
+    card.setConfig({ device_id: "dev1" });
+    card.calls = [];
+    card.reply = () => Promise.resolve();
+    card._hass = {
+      language: lang,
+      callService: (...args) => { card.calls.push(args); return card.reply(); },
+    };
+    card._brews = brewsOf();
+    card._index = 1; // b2: an older stored brew (paging back)
+    card._render();
+    return card;
+  };
+  const shown = (card, k) => !card._els[k].classList.contains("hidden");
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  // Stored brew: bin in the visible navigation, no confirmation yet.
+  let card = setup();
+  assert.ok(shown(card, "nav") && !card._els.nav.classList.contains("replaying"), "stored: nav with bin");
+  assert.equal(card._els.del.title, "Delete this brew");
+  assert.ok(!shown(card, "confirm"));
+  // Newest stored brew (index 0) too.
+  card._index = 0;
+  card._render();
+  assert.ok(shown(card, "nav"), "newest stored brew: bin shown");
+  card._index = 1;
+  card._render();
+
+  // Live brew: navigation hidden, asking does nothing.
+  const live = setup();
+  live._onLive({ type: "live_start", start_ts: 0, dose: 16, points: [], weight: 1, flow: 0, elapsed: 1, phase: "brewing" });
+  live._render();
+  assert.ok(!shown(live, "nav"), "live: no navigation, no bin");
+  live._askDelete();
+  assert.equal(live._confirm, null, "live: no confirmation");
+  // Ready view: same.
+  const ready = setup();
+  ready._onLive({ type: "live_ready", ready: true });
+  ready._render();
+  assert.ok(!shown(ready, "nav"), "ready: no bin");
+  ready._askDelete();
+  assert.equal(ready._confirm, null, "ready: no confirmation");
+  // Replay: the nav stays (stop button) but is marked replaying; the CSS
+  // hides the bin there.
+  const replay = setup();
+  replay._cache.set("b2", { ...brewsOf()[1], profile: [[0, 0, 0], [1, 1, 1]] });
+  replay._toggleReplay();
+  replay._render();
+  assert.ok(replay._els.nav.classList.contains("replaying"));
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(path.join(here, "../custom_components/difluid_scale/www/difluid-brew-card.js"), "utf8")
+  );
+  assert.match(src, /\.nav\.replaying \.delete \{ display: none; \}/);
+  assert.ok(!/window\.confirm\(|[^.\w_]confirm\(/.test(src), "no window.confirm()");
+  // A brew starting while the confirmation is open closes it.
+  const open = setup();
+  open._askDelete();
+  assert.ok(open._confirm);
+  open._onLive({ type: "live_start", start_ts: 0, dose: 16, points: [], weight: 1, flow: 0, elapsed: 1, phase: "brewing" });
+  open._render();
+  assert.equal(open._confirm, null, "live takes over: confirmation dropped");
+  assert.ok(!shown(open, "confirm"));
+
+  // Ask: the confirmation names the brew's local start time.
+  card._askDelete();
+  assert.ok(shown(card, "confirm"));
+  assert.equal(
+    card._els.confirmText.textContent,
+    "Delete the brew of Nov 23, 07:47 PM? It is also removed from the auto-stop learning."
+  );
+  assert.equal(card._els.confirmCancel.textContent, "Cancel");
+  // A brew without a learning sample: no learning sentence.
+  const plain = setup();
+  plain._index = 2;
+  plain._render();
+  plain._askDelete();
+  assert.equal(plain._els.confirmText.textContent, "Delete the brew of Nov 22, 08:05 AM?");
+  const plainDe = setup("de");
+  plainDe._index = 2;
+  plainDe._render();
+  plainDe._askDelete();
+  assert.equal(plainDe._els.confirmText.textContent, "Bezug vom 22.11. 08:05 löschen?");
+  // setConfig drops an open confirmation and a delete in flight.
+  plainDe._pendingDelete = { id: "b1", keep: "b2" };
+  plainDe.setConfig({ device_id: "dev1" });
+  assert.equal(plainDe._confirm, null);
+  assert.equal(plainDe._pendingDelete, null);
+  // A delete finishing after a setConfig leaves the new state alone.
+  const moved = setup();
+  let finish;
+  moved.reply = () => new Promise((r) => { finish = r; });
+  moved._askDelete();
+  const flight = moved._confirmDelete();
+  moved.setConfig({ device_id: "dev1" });
+  finish();
+  await flight;
+  assert.deepEqual(moved._brews.map((b) => b.id), ["b3", "b2", "b1"]);
+  assert.deepEqual(moved.loads, []);
+  assert.equal(card._els.confirmOk.textContent, "Delete");
+  assert.ok(card._els.del.disabled, "bin disabled while asking");
+  // Cancel: nothing called, nothing changed.
+  card._cancelDelete();
+  assert.ok(!shown(card, "confirm"));
+  assert.equal(card.calls.length, 0);
+  assert.deepEqual(card._brews.map((b) => b.id), ["b3", "b2", "b1"]);
+  assert.equal(card._index, 1);
+  assert.deepEqual(card.loads, []);
+
+  // German text, exactly as specified.
+  const de = setup("de");
+  de._askDelete();
+  assert.equal(
+    de._els.confirmText.textContent,
+    "Bezug vom 23.11. 19:47 löschen? Er wird auch aus dem Lernstopp entfernt."
+  );
+  assert.equal(de._els.confirmCancel.textContent, "Abbrechen");
+  assert.equal(de._els.confirmOk.textContent, "Löschen");
+
+  // Confirm: delete_brew with the brew id and the card's scale, no HA toast;
+  // a brews update arriving meanwhile keeps the neighbour; then the next
+  // older brew (b1) is shown.
+  let release;
+  card.reply = () => new Promise((r) => { release = r; });
+  card._askDelete();
+  const done = card._confirmDelete();
+  assert.deepEqual(card.calls[0], ["difluid_scale", "delete_brew", { brew_id: "b2", device_id: "dev1" }, undefined, false]);
+  assert.ok(card._els.confirmOk.disabled && card._els.confirmCancel.disabled, "buttons off while deleting");
+  card._onUpdate({});
+  assert.deepEqual(card.loads, ["b1"], "update during the delete keeps the neighbour");
+  release();
+  await done;
+  assert.ok(!shown(card, "confirm"));
+  assert.deepEqual(card._brews.map((b) => b.id), ["b3", "b1"]);
+  assert.equal(card._brews[card._index].id, "b1", "next older brew shown");
+  assert.deepEqual(card.loads, ["b1", "b1"]);
+  assert.equal(card._pendingDelete, null);
+
+  // The oldest brew: the newer neighbour is shown.
+  const oldest = setup();
+  oldest._index = 2;
+  oldest._render();
+  oldest._askDelete();
+  await oldest._confirmDelete();
+  assert.equal(oldest.calls[0][2].brew_id, "b1");
+  assert.deepEqual(oldest._brews.map((b) => b.id), ["b3", "b2"]);
+  assert.equal(oldest._brews[oldest._index].id, "b2");
+  assert.deepEqual(oldest.loads, ["b2"]);
+
+  // The only brew: empty state afterwards.
+  const only = setup();
+  only._brews = [brewsOf()[0]];
+  only._index = 0;
+  only._render();
+  only._askDelete();
+  await only._confirmDelete();
+  assert.deepEqual(only._brews, []);
+  assert.deepEqual(only.loads, [null]);
+  only._render();
+  assert.ok(shown(only, "message") && !shown(only, "nav"), "empty state");
+  assert.match(only._els.message.textContent, /No brews yet/);
+
+  // Error: shown in the card's confirmation, nothing removed, buttons back.
+  const fail = setup();
+  fail.reply = () => Promise.reject(new Error("Brew b2 is still running"));
+  fail._askDelete();
+  await fail._confirmDelete();
+  await tick();
+  assert.ok(shown(fail, "confirm"), "confirmation stays open");
+  assert.ok(shown(fail, "confirmError"));
+  assert.equal(fail._els.confirmError.textContent, "Brew b2 is still running");
+  assert.ok(!fail._els.confirmOk.disabled && !fail._els.confirmCancel.disabled);
+  assert.deepEqual(fail._brews.map((b) => b.id), ["b3", "b2", "b1"]);
+  assert.equal(fail._index, 1);
+  assert.deepEqual(fail.loads, []);
+  // Without a message: the translated fallback.
+  fail.reply = () => Promise.reject({});
+  await fail._confirmDelete();
+  assert.equal(fail._els.confirmError.textContent, "Could not delete the brew");
+  // A translated exception (brew_busy): shown in the UI language like HA's
+  // own toast, via the backend translations.
+  const asked = [];
+  fail._hass.loadBackendTranslation = async (category, domain) => {
+    asked.push([category, domain]);
+    return (key, ph) =>
+      key === "component.difluid_scale.exceptions.brew_busy.message"
+        ? "Dieser Bezug läuft noch"
+        : "";
+  };
+  fail.reply = () => Promise.reject({
+    code: "service_validation_error",
+    message: "Brew b2 is still running",
+    translation_domain: "difluid_scale",
+    translation_key: "brew_busy",
+  });
+  await fail._confirmDelete();
+  assert.deepEqual(asked, [["exceptions", "difluid_scale"]]);
+  assert.equal(fail._els.confirmError.textContent, "Dieser Bezug läuft noch");
+  fail._cancelDelete();
+  assert.ok(!shown(fail, "confirm"));
   scenarios++;
 }
 

@@ -7,7 +7,9 @@ puck drips afterwards. The overshoot is modelled as
     overshoot = c + tau * flow_at_cut
 
 - ``tau`` (s): effective latency, including any constant lag of the flow
-  estimate;
+  estimate and the *nominal* stop switch latency (the measured deviation of
+  each cut's switch latency from it is taken out of the learning sample,
+  see ``adjusted_overshoot``);
 - ``c`` (g): drip after the pump stopped.
 
 A brew is cut when ``weight + c + tau * flow >= target``. After every cut
@@ -100,6 +102,20 @@ SETTLE_TIMEOUT = 30.0  # s
 # 2026-11-21 15:55); then it is stopped. Backstop, not a delay: the timer
 # is stopped at the latest this long after the cut.
 TIMER_STOP_MAX = 20.0  # s after the cut
+
+# Stop switch latency: turn_off call -> the switch reports ``off``. Measured
+# for a Zigbee2MQTT plug (2026-11-23, 109 switch-offs): median 68 ms, p95
+# 306 ms, rare outliers of 0.3-3.1 s that cannot be predicted. ``tau``
+# keeps meaning the total effective latency including a *nominal* switch
+# latency: the running median of the last SWITCH_LATENCY_COUNT measured
+# cuts (SWITCH_LATENCY_DEFAULT until SWITCH_LATENCY_MIN_COUNT are known).
+# A learning sample is corrected by the part of its overshoot that the
+# switch's deviation from that nominal caused (see adjusted_overshoot).
+SWITCH_LATENCY_COUNT = 15
+SWITCH_LATENCY_MIN_COUNT = 3
+SWITCH_LATENCY_DEFAULT = 0.07  # s
+# No ``off`` report within this after the call: latency unknown.
+SWITCH_LATENCY_TIMEOUT = 5.0  # s
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -225,6 +241,12 @@ class StopModel:
     @classmethod
     def from_dict(cls, data: Any) -> StopModel:
         """Restore; invalid data gives the prior."""
+        model = cls.parse(data)
+        return model if model is not None else cls()
+
+    @classmethod
+    def parse(cls, data: Any) -> StopModel | None:
+        """Restore; None for missing or invalid data."""
         model = cls()
         try:
             tau = float(data["tau"])
@@ -232,19 +254,184 @@ class StopModel:
             p = [[float(v) for v in row] for row in data["p"]]
             count = int(data["count"])
         except (KeyError, TypeError, ValueError):
-            return model
+            return None
         if (
             len(p) != 2
             or any(len(row) != 2 for row in p)
             or not all(math.isfinite(v) for v in (tau, c, *p[0], *p[1]))
             or count < 0
         ):
-            return model
+            return None
         model.tau = _clamp(tau, TAU_MIN, TAU_MAX)
         model.c = _clamp(c, C_MIN, C_MAX)
         model.p = p
         model.count = count
         return model
+
+    def copy(self) -> StopModel:
+        """An independent copy (same floats)."""
+        return StopModel.from_dict(self.to_dict())
+
+
+# Accepted learning samples kept for un-learning (older ones are folded
+# into the journal's base).
+JOURNAL_MAX = 50
+
+
+class LearningJournal:
+    """Every accepted learning sample, so one can be taken out again.
+
+    ``entries`` (oldest first) hold exactly what was fed into
+    ``StopModel.update``: the regressor ``flow`` and the ``overshoot``
+    (latency-adjusted where the cut had a measured switch latency), plus
+    ``brew_id`` / ``start`` (ISO, as stored with the brew) of the brew and
+    the time ``t`` it was learned. ``base`` is the model before the first
+    entry: the prior for a fresh model, the stored model for one learned
+    before the journal existed (0.5.1), so nothing learned earlier is
+    lost by a replay.
+
+    ``replay()`` starts from ``base`` and feeds the entries in order through
+    the same ``update``; with an unchanged journal it reproduces the
+    incrementally learned model exactly (same operations on the same
+    floats). Beyond ``JOURNAL_MAX`` entries the oldest is dropped from the
+    journal and folded into ``base`` (``base.update`` with it): the model
+    stays identical, but that sample can no longer be taken out. Its weight
+    in the current model is at most FORGETTING ** JOURNAL_MAX (0.93 ** 50 ~
+    2.6 %), so not being able to remove it is negligible.
+    """
+
+    def __init__(
+        self,
+        base: StopModel | None = None,
+        entries: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Start on ``base`` (default: the prior) with ``entries``."""
+        self.base = base.copy() if base is not None else StopModel()
+        self.entries: list[dict[str, Any]] = []
+        for entry in entries or ():
+            self.add(entry)
+
+    def __len__(self) -> int:
+        """Number of entries (samples that can still be taken out)."""
+        return len(self.entries)
+
+    @staticmethod
+    def entry(
+        flow: float,
+        overshoot: float,
+        brew_id: str | None = None,
+        start: str | None = None,
+        t: str | None = None,
+    ) -> dict[str, Any]:
+        """One journal entry (plain data for the store)."""
+        return {
+            "brew_id": brew_id,
+            "start": start,
+            "flow": flow,
+            "overshoot": overshoot,
+            "t": t,
+        }
+
+    def add(self, entry: dict[str, Any]) -> None:
+        """Append an accepted sample; fold the oldest beyond the cap."""
+        self.entries.append(entry)
+        while len(self.entries) > JOURNAL_MAX:
+            old = self.entries.pop(0)
+            self.base.update(old["flow"], old["overshoot"])
+
+    @staticmethod
+    def matches(
+        entry: dict[str, Any], brew_id: str | None, start: str | None
+    ) -> bool:
+        """Entry belongs to the brew: by id, or by start (an entry learned
+        before its brew was stored, see ``set_brew_id``)."""
+        return (brew_id is not None and entry.get("brew_id") == brew_id) or (
+            start is not None and entry.get("start") == start
+        )
+
+    def index_of(self, brew_id: str | None, start: str | None) -> int | None:
+        """Position of the brew's first entry, None if not journalled."""
+        for i, entry in enumerate(self.entries):
+            if self.matches(entry, brew_id, start):
+                return i
+        return None
+
+    def set_brew_id(self, start: str, brew_id: str) -> bool:
+        """Fill in the id of entries learned for the brew starting at
+        ``start`` before it was stored; True if one changed."""
+        changed = False
+        for entry in self.entries:
+            if entry.get("brew_id") is None and entry.get("start") == start:
+                entry["brew_id"] = brew_id
+                changed = True
+        return changed
+
+    def remove(self, brew_id: str | None, start: str | None) -> int:
+        """Drop the brew's entries; how many were removed."""
+        before = len(self.entries)
+        self.entries = [
+            e for e in self.entries if not self.matches(e, brew_id, start)
+        ]
+        return before - len(self.entries)
+
+    def replay(self) -> StopModel:
+        """The model learned from ``base`` and the entries, in order."""
+        model = self.base.copy()
+        for entry in self.entries:
+            model.update(entry["flow"], entry["overshoot"])
+        return model
+
+    def to_dict(self) -> dict[str, Any]:
+        """Plain data for the store."""
+        return {
+            "base": self.base.to_dict(),
+            "entries": [dict(e) for e in self.entries],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any, model: StopModel) -> LearningJournal:
+        """Restore. Missing or invalid data gives an empty journal on
+        ``model``: a store from before the journal keeps its model, and
+        replaying the empty journal gives that model back."""
+        journal = cls.parse(data)
+        return journal if journal is not None else cls(model)
+
+    @classmethod
+    def parse(cls, data: Any) -> LearningJournal | None:
+        """Restore; None without a valid ``base``. Entries that are not a
+        dict or whose flow/overshoot is not a finite number are skipped
+        (the sum base count + entries then no longer equals the model's
+        count)."""
+        if not isinstance(data, dict):
+            return None
+        base = StopModel.parse(data.get("base"))
+        if base is None:
+            return None
+        raw_entries = data.get("entries")
+        entries: list[dict[str, Any]] = []
+        for raw in raw_entries if isinstance(raw_entries, list) else ():
+            if not isinstance(raw, dict):
+                continue
+            flow, overshoot = raw.get("flow"), raw.get("overshoot")
+            if not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool)
+                for v in (flow, overshoot)
+            ):
+                continue
+            flow, overshoot = float(flow), float(overshoot)
+            if not (math.isfinite(flow) and math.isfinite(overshoot)):
+                continue
+            brew_id, start, t = raw.get("brew_id"), raw.get("start"), raw.get("t")
+            entries.append(
+                cls.entry(
+                    flow,
+                    overshoot,
+                    brew_id if isinstance(brew_id, str) else None,
+                    start if isinstance(start, str) else None,
+                    t if isinstance(t, str) else None,
+                )
+            )
+        return cls(base, entries)
 
 
 class SampleFilter:
@@ -328,6 +515,85 @@ def _median(values: list[float]) -> float:
     if len(ordered) % 2:
         return ordered[mid]
     return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+class SwitchLatencies:
+    """Measured stop switch latencies (s) of the last cuts, newest last.
+
+    Bound to the switch entity they were measured on: another switch
+    starts empty (its latency is a property of that device).
+    ``unknown_streak`` counts the cuts in a row whose measurement ran but
+    ended without a value (no ``off`` report in time, failed call).
+    """
+
+    def __init__(
+        self, entity_id: str | None = None, values: list[float] | None = None
+    ) -> None:
+        """Start empty (or from stored values)."""
+        self.entity_id = entity_id
+        self.values: deque[float] = deque(values or (), maxlen=SWITCH_LATENCY_COUNT)
+        self.unknown_streak = 0
+
+    def nominal(self, entity_id: str | None) -> float:
+        """Nominal latency for ``entity_id``: median of the stored values,
+        the default with fewer than SWITCH_LATENCY_MIN_COUNT (or for another
+        switch)."""
+        if entity_id != self.entity_id or len(self.values) < SWITCH_LATENCY_MIN_COUNT:
+            return SWITCH_LATENCY_DEFAULT
+        return _median(list(self.values))
+
+    def add(self, entity_id: str, latency: float | None) -> None:
+        """One measured cut on ``entity_id`` (None: measured, no value)."""
+        if entity_id != self.entity_id:
+            self.entity_id = entity_id
+            self.values.clear()
+            self.unknown_streak = 0
+        if latency is None:
+            self.unknown_streak += 1
+            return
+        self.unknown_streak = 0
+        self.values.append(latency)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Plain data for the store."""
+        return {
+            "entity_id": self.entity_id,
+            "values": list(self.values),
+            "unknown_streak": self.unknown_streak,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> SwitchLatencies:
+        """Restore; invalid or missing data gives an empty history."""
+        if not isinstance(data, dict):
+            return cls()
+        entity_id = data.get("entity_id")
+        values: list[float] = []
+        for value in data.get("values") or ():
+            try:
+                latency = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(latency) and 0.0 <= latency <= SWITCH_LATENCY_TIMEOUT:
+                values.append(latency)
+        result = cls(entity_id if isinstance(entity_id, str) else None, values)
+        streak = data.get("unknown_streak")
+        if isinstance(streak, int) and not isinstance(streak, bool) and streak > 0:
+            result.unknown_streak = streak
+        return result
+
+
+def adjusted_overshoot(
+    overshoot: float, flow: float, latency: float, nominal: float
+) -> float:
+    """Overshoot as if the switch had taken its nominal latency.
+
+    The pump ran ``latency - nominal`` seconds longer (or shorter) than
+    usual at about the flow at the cut, so ``y_adj = y - flow * (latency -
+    nominal)`` (flow clamped at 0 like the model's regressor). The plausible
+    overshoot window applies to this adjusted value.
+    """
+    return overshoot - max(0.0, flow) * (latency - nominal)
 
 
 class FlowEstimator:
@@ -509,3 +775,11 @@ class Cut:
     # No frame dropped and no level change within FLOW_WINDOW before the cut
     # (else the shot is not learned: the flow may be distorted).
     clean: bool = True
+    # Nominal switch latency (s) when the cut was made (used to correct
+    # this cut's learning sample) and the measured one (None: not measured
+    # yet, timed out, switch already off/unavailable, or the call failed).
+    nominal_latency: float = SWITCH_LATENCY_DEFAULT
+    switch_latency: float | None = None
+    # True until the measurement ended (learning waits for it, at most
+    # SWITCH_LATENCY_TIMEOUT after the call).
+    latency_pending: bool = False

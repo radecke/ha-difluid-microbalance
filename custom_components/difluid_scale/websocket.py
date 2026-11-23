@@ -57,6 +57,17 @@ def _resolve(hass: HomeAssistant, msg: dict[str, Any]) -> BrewHistory | None:
     return entry.runtime_data.brews if entry else None
 
 
+def _flag_learned(
+    hass: HomeAssistant, history: BrewHistory, brew: dict[str, Any]
+) -> dict[str, Any]:
+    """``brew`` plus ``learned``: its sample is in the auto-stop learning
+    journal (deleting it takes the sample out of the model)."""
+    entry = hass.config_entries.async_get_entry(history.entry_id)
+    coordinator = getattr(entry, "runtime_data", None) if entry else None
+    learned = coordinator is not None and coordinator.autostop.learned(brew)
+    return {**brew, "learned": learned}
+
+
 def _not_found(connection: websocket_api.ActiveConnection, msg_id: int) -> None:
     connection.send_error(
         msg_id,
@@ -72,12 +83,16 @@ def ws_brews(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Brew summaries (no profiles), newest first."""
+    """Brew summaries (no profiles), newest first; each with ``learned``."""
     if (history := _resolve(hass, msg)) is None:
         _not_found(connection, msg["id"])
         return
     connection.send_result(
-        msg["id"], {"entry_id": history.entry_id, "brews": history.summaries()}
+        msg["id"],
+        {
+            "entry_id": history.entry_id,
+            "brews": [_flag_learned(hass, history, b) for b in history.summaries()],
+        },
     )
 
 
@@ -104,7 +119,9 @@ def ws_brew(
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Unknown brew")
         return
     if brew is not None:
-        brew = {k: v for k, v in brew.items() if k != "counted_dose"}
+        brew = _flag_learned(
+            hass, history, {k: v for k, v in brew.items() if k != "counted_dose"}
+        )
     connection.send_result(msg["id"], {"entry_id": history.entry_id, "brew": brew})
 
 

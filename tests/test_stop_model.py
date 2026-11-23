@@ -496,6 +496,207 @@ def test_profile_cut_uses_live_flow() -> None:
     assert sm.profile_cut(profile, 26.0) is None
 
 
+def test_switch_latencies_nominal_median_and_switch_change() -> None:
+    lat = sm.SwitchLatencies()
+    sw = "switch.kuche_steckdose"
+    assert lat.nominal(sw) == sm.SWITCH_LATENCY_DEFAULT == 0.07
+    lat.add(sw, 0.068)
+    lat.add(sw, 0.459)
+    assert lat.nominal(sw) == 0.07  # fewer than 3: default
+    lat.add(sw, 0.05)
+    assert lat.nominal(sw) == 0.068  # median: the outlier does not count
+    assert lat.nominal("switch.other") == 0.07
+    for _ in range(20):
+        lat.add(sw, 0.1)
+    assert len(lat.values) == sm.SWITCH_LATENCY_COUNT == 15
+    assert lat.nominal(sw) == 0.1
+    lat.add("switch.other", 0.2)  # another switch: starts over
+    assert list(lat.values) == [0.2] and lat.entity_id == "switch.other"
+    back = sm.SwitchLatencies.from_dict(json.loads(json.dumps(lat.to_dict())))
+    assert back.entity_id == "switch.other" and list(back.values) == [0.2]
+    # Missing or broken data: empty.
+    for data in (None, [], {"values": "x"}, {"entity_id": 3, "values": [None]}):
+        assert len(sm.SwitchLatencies.from_dict(data).values) == 0
+    # Measured without a value: counts a streak, the values stay.
+    lat.add("switch.other", None)
+    lat.add("switch.other", None)
+    assert lat.unknown_streak == 2 and list(lat.values) == [0.2]
+    again = sm.SwitchLatencies.from_dict(lat.to_dict())
+    assert again.unknown_streak == 2
+    lat.add("switch.other", 0.1)
+    assert lat.unknown_streak == 0
+    lat.add(sw, None)  # another switch: starts over
+    assert lat.unknown_streak == 1 and len(lat.values) == 0
+    bad = sm.SwitchLatencies.from_dict(
+        {"entity_id": sw, "values": [0.07, "nan", -1, 9.0, "0.08"]}
+    )
+    assert list(bad.values) == [0.07, 0.08]
+
+
+def test_adjusted_overshoot_removes_switch_outlier() -> None:
+    """y_adj = y - flow * (L - L_nom): an outlier latency teaches the same
+    tau as a nominal one; flow clamped at 0 like the regressor."""
+    flow, tau, c = 2.0, 1.2, 0.3
+    nominal_y = c + tau * flow
+    slow_y = nominal_y + flow * (0.459 - 0.07)  # pump ran 0.389 s longer
+    adj = sm.adjusted_overshoot(slow_y, flow, 0.459, 0.07)
+    assert math.isclose(adj, nominal_y)
+    a, b = sm.StopModel(), sm.StopModel()
+    assert a.update(flow, nominal_y) and b.update(flow, adj)
+    assert math.isclose(a.tau, b.tau)
+    assert sm.adjusted_overshoot(1.0, -0.5, 3.0, 0.07) == 1.0
+    # The plausible window applies to the adjusted value.
+    assert not sm.StopModel().update(flow, sm.adjusted_overshoot(0.5, flow, 1.0, 0.07))
+
+
+
+# ------------------------------------------------------- learning journal
+
+
+def _journal_run(base, samples):
+    """Learn ``samples`` incrementally on a copy of ``base``, journalling
+    the accepted ones like the integration does."""
+    model = base.copy()
+    journal = sm.LearningJournal(base)
+    for i, (flow, y) in enumerate(samples):
+        if model.update(flow, y):
+            journal.add(sm.LearningJournal.entry(flow, y, f"b{i}", f"s{i}"))
+    return model, journal
+
+
+def _samples(n: int, seed: int = 7):
+    rng = random.Random(seed)
+    out = []
+    for i in range(n):
+        flow = rng.uniform(0.5, 4.0)
+        y = 0.4 + 0.6 * flow + rng.gauss(0.0, 0.3)
+        if i % 9 == 4:
+            y = 7.5  # outlier: rejected, never journalled
+        out.append((flow, y))
+    return out
+
+
+def test_journal_replay_reproduces_incremental_model_exactly() -> None:
+    """Unchanged journal -> replay == incremental, bit for bit: prior phase,
+    full RLS, rejected outliers, the 50-entry cap (folded into the base) and
+    a JSON round trip of the store."""
+    for n in (0, 2, 3, 10, 50, 51, 80):
+        model, journal = _journal_run(sm.StopModel(), _samples(n))
+        assert len(journal) <= sm.JOURNAL_MAX
+        assert journal.base.count + len(journal) == model.count
+        assert journal.replay().to_dict() == model.to_dict(), n
+        stored = json.loads(json.dumps(journal.to_dict()))
+        again = sm.LearningJournal.from_dict(stored, sm.StopModel())
+        assert again.replay().to_dict() == model.to_dict(), n
+        assert again.entries == journal.entries
+
+
+def test_journal_cap_folds_oldest_into_base() -> None:
+    model, journal = _journal_run(sm.StopModel(), [(2.0, 2.0)] * 60)
+    assert model.count == 60
+    assert len(journal) == sm.JOURNAL_MAX
+    assert journal.base.count == 10
+    assert journal.entries[0]["brew_id"] == "b10"
+    # The base is the model after the first 10 samples.
+    first, _ = _journal_run(sm.StopModel(), [(2.0, 2.0)] * 10)
+    assert journal.base.to_dict() == first.to_dict()
+    # Taking out a folded sample is no longer possible.
+    assert journal.remove("b3", None) == 0
+
+
+def test_journal_remove_equals_learning_without_the_sample() -> None:
+    samples = [s for s in _samples(30) if sm.StopModel.plausible(s[1], s[0])]
+    model, journal = _journal_run(sm.StopModel(), samples)
+    victim = journal.entries[5]
+    assert journal.remove(victim["brew_id"], None) == 1
+    without, _ = _journal_run(
+        sm.StopModel(), [s for i, s in enumerate(samples) if i != 5]
+    )
+    assert journal.replay().to_dict() == without.to_dict()
+    assert journal.replay().count == model.count - 1
+    # Unknown brew: nothing removed.
+    assert journal.remove("nope", "nope") == 0
+
+
+def test_journal_matches_by_start_and_fills_brew_id() -> None:
+    journal = sm.LearningJournal()
+    journal.add(sm.LearningJournal.entry(2.0, 2.0, None, "2026-11-23T18:47:10+00:00"))
+    assert journal.index_of("01X", "2026-11-23T18:47:10+00:00") == 0
+    assert journal.set_brew_id("2026-11-23T18:47:10+00:00", "01X")
+    assert not journal.set_brew_id("2026-11-23T18:47:10+00:00", "01Y")
+    assert journal.entries[0]["brew_id"] == "01X"
+    assert journal.index_of("01X", None) == 0
+    assert journal.index_of(None, None) is None
+
+
+def test_journal_migration_keeps_model() -> None:
+    """A store from before the journal: base = stored model, journal empty,
+    replay gives the model back; deleting only takes out journalled
+    samples, so the old samples survive a replay."""
+    real = {  # stop_learning model from the live host, 2026-11-23
+        "tau": 0.38747342367333987,
+        "c": 0.5755018357938158,
+        "p": [
+            [0.028181263457567066, -0.10629041070026514],
+            [-0.10629041070026514, 0.5468506312209026],
+        ],
+        "count": 11,
+    }
+    model = sm.StopModel.from_dict(real)
+    for data in (None, {}, {"entries": []}, "junk"):
+        journal = sm.LearningJournal.from_dict(data, model)
+        assert len(journal) == 0
+        assert journal.replay().to_dict() == model.to_dict()
+    journal = sm.LearningJournal.from_dict(None, model)
+    learned = model.copy()
+    assert learned.update(2.1, 1.9)
+    journal.add(sm.LearningJournal.entry(2.1, 1.9, "new", None))
+    assert journal.replay().to_dict() == learned.to_dict()
+    journal.remove("new", None)
+    assert journal.replay().to_dict() == real
+    # Damaged entries are skipped on load.
+    stored = {"base": real, "entries": [{"flow": "x"}, 5, {"flow": 2.0, "overshoot": float("nan")}, {"flow": 2.0, "overshoot": 2.0, "brew_id": 3}]}
+    journal = sm.LearningJournal.from_dict(stored, sm.StopModel())
+    assert len(journal) == 1 and journal.entries[0]["brew_id"] is None
+
+
+
+def test_journal_parse_garbage() -> None:
+    """Invalid journals give None (-> empty journal on the stored model);
+    damaged entries are skipped one by one."""
+    base = sm.StopModel().to_dict()
+    for bad in (None, 5, "x", [], {}, {"entries": []}, {"base": "x"},
+                {"base": {"tau": float("nan"), "c": 0.3, "p": [[1, 0], [0, 1]], "count": 0}},
+                {"base": {"tau": 1.0, "c": 0.3, "p": [[1, 0]], "count": 0}},
+                {"base": {"tau": 1.0, "c": 0.3, "p": [[1, 0], [0, 1]], "count": -1}}):
+        assert sm.LearningJournal.parse(bad) is None, bad
+    assert len(sm.LearningJournal.parse({"base": base, "entries": "abc"})) == 0
+    assert len(sm.LearningJournal.parse({"base": base, "entries": {"flow": 2.0}})) == 0
+    entries = [
+        "x", 5, None, [2.0, 2.0],
+        {"flow": "2.0", "overshoot": 2.0},  # string
+        {"flow": True, "overshoot": 2.0},  # bool
+        {"flow": 2.0, "overshoot": None},
+        {"flow": float("nan"), "overshoot": 2.0},
+        {"flow": 2.0, "overshoot": float("inf")},
+        {"overshoot": 2.0},
+        {"flow": 2, "overshoot": 2.5, "brew_id": 7, "start": ["x"], "t": 1},
+        {"flow": 1.5, "overshoot": 1.2, "brew_id": "ok", "start": "s", "t": "t"},
+    ]
+    journal = sm.LearningJournal.parse({"base": base, "entries": entries})
+    assert journal.entries == [
+        {"brew_id": None, "start": None, "flow": 2.0, "overshoot": 2.5, "t": None},
+        {"brew_id": "ok", "start": "s", "flow": 1.5, "overshoot": 1.2, "t": "t"},
+    ]
+    # from_dict falls back to an empty journal on the given model.
+    model = sm.StopModel()
+    model.update(2.0, 2.0)
+    fallback = sm.LearningJournal.from_dict({"base": "x"}, model)
+    assert len(fallback) == 0 and fallback.replay().to_dict() == model.to_dict()
+    assert sm.StopModel.parse({"tau": 1}) is None
+    assert sm.StopModel.from_dict({"tau": 1}).to_dict() == sm.StopModel().to_dict()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

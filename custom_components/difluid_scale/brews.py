@@ -64,6 +64,11 @@ class BrewStore(Store[dict[str, Any]]):
     1.1 -> 1.2 (0.5.0): brews get ``bean`` (None for older brews). Metrics
     are computed on load from the profile (see ``BrewHistory.async_load``),
     so they need no migration step.
+    0.5.1: brews get ``switch_latency`` (measured stop switch latency of an
+    auto-stop cut, s; null without a cut or without a value) and, for a cut
+    whose measurement ended without a value, ``switch_latency_unknown:
+    true``. Brews from before 0.5.1 lack both keys (= never measured) and
+    are read with ``.get``, so no version step.
     """
 
     async def _async_migrate_func(
@@ -223,6 +228,8 @@ class BrewHistory:
         bean: str | None = None,
         target: dict[str, Any] | None = None,
         cut_at: float | None = None,
+        switch_latency: float | None = None,
+        switch_latency_unknown: bool = False,
     ) -> dict[str, Any]:
         """Store a finished brew, update totals, fire the bus event.
 
@@ -233,11 +240,18 @@ class BrewHistory:
         ``target`` the auto-stop target of the brew (``target`` g and
         ``target_source``, None while the auto-stop is off); ``cut_at`` the
         seconds to the auto-stop cut: the brew time ends there (pump off),
-        not at the timer stop after the drips.
+        not at the timer stop after the drips. ``switch_latency`` the
+        measured stop switch latency of that cut (None: no cut, unknown, or
+        not measured yet: ``async_set_switch_latency`` adds it later);
+        ``switch_latency_unknown`` True when that cut's measurement ended
+        without a value (stored as ``switch_latency_unknown: true``).
         """
         start = datetime.fromtimestamp(result.start, UTC).isoformat()
-        if result.updated and (old := self._find_start(start)) is not None:
-            return self._async_replace(old, result, target, cut_at)
+        if result.updated and (old := self.find_start(start)) is not None:
+            brew = self._async_replace(old, result, target, cut_at, switch_latency)
+            if switch_latency_unknown and brew.get("switch_latency") is None:
+                brew["switch_latency_unknown"] = True
+            return brew
         brew = {
             "id": ulid_now(),
             "start": start,
@@ -251,8 +265,11 @@ class BrewHistory:
             "bean": bean,
             "target": target["target"] if target else None,
             "target_source": target["target_source"] if target else None,
+            "switch_latency": switch_latency,
             "profile": [list(p) for p in result.profile],
         }
+        if switch_latency_unknown:
+            brew["switch_latency_unknown"] = True
         if metrics := brew_metrics(brew["profile"]):
             brew["metrics"] = metrics
         self.brews.append(brew)
@@ -263,7 +280,26 @@ class BrewHistory:
         self._async_completed(brew, updated=False)
         return brew
 
-    def _find_start(self, start: str) -> dict[str, Any] | None:
+    @callback
+    def async_set_switch_latency(self, start: float, latency: float | None) -> None:
+        """Add the stop switch latency to the stored brew that started at
+        ``start`` (tracker clock, epoch s) once its measurement ended after
+        the brew was stored (None: ended without a value, marked
+        ``switch_latency_unknown``). Unchanged if no such brew or known."""
+        brew = self.find_start(datetime.fromtimestamp(start, UTC).isoformat())
+        if brew is None or brew.get("switch_latency") is not None:
+            return
+        if latency is None:
+            if brew.get("switch_latency_unknown"):
+                return
+            brew["switch_latency_unknown"] = True
+        else:
+            brew["switch_latency"] = latency
+            brew.pop("switch_latency_unknown", None)
+        self._async_changed()
+
+    def find_start(self, start: str) -> dict[str, Any] | None:
+        """The stored brew that started at ``start`` (ISO, as stored)."""
         return next((b for b in reversed(self.brews) if b["start"] == start), None)
 
     @callback
@@ -273,8 +309,11 @@ class BrewHistory:
         result: BrewResult,
         target: dict[str, Any] | None = None,
         cut_at: float | None = None,
+        switch_latency: float | None = None,
     ) -> dict[str, Any]:
         brew["duration"] = _duration(result, cut_at)
+        if switch_latency is not None:
+            brew["switch_latency"] = switch_latency
         brew["yield"] = result.yield_g
         brew["profile"] = [list(p) for p in result.profile]
         if target is not None:
@@ -328,20 +367,18 @@ class BrewHistory:
 
     @callback
     def async_delete(self, brew_id: str) -> dict[str, Any]:
-        """Remove a stored brew and take it out of the totals.
+        """Remove a stored brew from the history.
 
-        No brew-completed event; listeners, the dispatcher signal (card) and
+        The totals ``brew_count`` and ``coffee_total`` stay as they are:
+        they count every brew ever made (total_increasing sensors; a
+        decrease would look like a meter reset to the statistics). No
+        brew-completed event; listeners, the dispatcher signal (card) and
         the store are updated. Raises LookupError for an unknown id.
         """
         brew = self.get(brew_id)
         if brew is None:
             raise LookupError(brew_id)
         self.brews.remove(brew)
-        self.brew_count = max(0, self.brew_count - 1)
-        counted = brew.get("counted_dose")
-        if counted is None:
-            counted = brew.get("dose") or 0.0
-        self.coffee_total = max(0.0, round(self.coffee_total - counted, 1))
         self._async_changed()
         return brew
 

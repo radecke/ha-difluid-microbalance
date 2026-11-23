@@ -22,6 +22,22 @@
  * flow_smoothing seconds. Both use only earlier points, so the live curve is
  * never revised. Plotted weight, hover and live stats use these values.
  *
+ * Smoothed flow (stored brews only): a second, calm flow line. The whole
+ * brew is known, so it is centred: single outlier frames (more than
+ * TREND_SPIKE_G from the median of their neighbours) are replaced, the
+ * weight is fitted non-decreasing (isotonic regression), then flow = slope
+ * of a Gaussian-weighted local linear fit (sigma TREND_SIGMA s). Only points
+ * from the first drop (FLOW_START_DELTA above the start weight) to the brew
+ * end (the stored duration: auto-stop cut, else timer stop) count, and the
+ * line spans exactly that range, so the kernel neither invents flow before
+ * the drops nor gets pulled down by the drips after the cut.
+ *
+ * Delete (stored brews only): a bin button next to the navigation asks in
+ * the card itself (no window.confirm, which the iOS app's web view may not
+ * show) and then calls the delete_brew service; the card moves on to the
+ * next older brew (else the newer one, else the empty state). Never in the
+ * live, ready or replay view.
+ *
  * Detail line (stored brews): bean and the shot metrics the integration
  * computes per brew (time to first drop, peak flow, mean flow and its
  * variation in the main phase); parts that are missing are left out.
@@ -43,7 +59,7 @@
  * subscription's snapshot); never in edit mode or the editor.
  */
 
-const CARD_VERSION = "0.5.0";
+const CARD_VERSION = "0.5.1";
 const DOMAIN = "difluid_scale";
 
 const STRINGS = {
@@ -54,10 +70,17 @@ const STRINGS = {
     ratio: "Ratio",
     time: "Time",
     flow: "Flow",
+    trend: "Smoothed flow",
     weight: "Weight",
     corrected: "corrected",
     older: "Older brew",
     newer: "Newer brew",
+    delete: "Delete this brew",
+    delete_confirm: "Delete the brew of {when}?",
+    delete_confirm_learned: "It is also removed from the auto-stop learning.",
+    delete_cancel: "Cancel",
+    delete_ok: "Delete",
+    delete_error: "Could not delete the brew",
     empty: "No brews yet. Start the scale's timer to record one.",
     loading: "Loading…",
     error: "Could not load brews",
@@ -96,10 +119,17 @@ const STRINGS = {
     ratio: "Verhältnis",
     time: "Zeit",
     flow: "Fluss",
+    trend: "Fluss geglättet",
     weight: "Gewicht",
     corrected: "korrigiert",
     older: "Älterer Bezug",
     newer: "Neuerer Bezug",
+    delete: "Diesen Bezug löschen",
+    delete_confirm: "Bezug vom {when} löschen?",
+    delete_confirm_learned: "Er wird auch aus dem Lernstopp entfernt.",
+    delete_cancel: "Abbrechen",
+    delete_ok: "Löschen",
+    delete_error: "Bezug konnte nicht gelöscht werden",
     empty: "Noch keine Bezüge. Starte den Timer der Waage, um einen aufzuzeichnen.",
     loading: "Lädt …",
     error: "Bezüge konnten nicht geladen werden",
@@ -137,6 +167,7 @@ const ICON_LEFT = "M15.41,16.58L10.83,12L15.41,7.41L14,6L8,12L14,18L15.41,16.58Z
 const ICON_RIGHT = "M8.59,16.58L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.58Z";
 const ICON_PLAY = "M8,5.14V19.14L19,12.14L8,5.14Z";
 const ICON_STOP = "M18,18H6V6H18V18Z";
+const ICON_DELETE = "M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19M8,9H16V19H8V9M15.5,4L14.5,3H9.5L8.5,4H5V6H19V4H15.5Z"; // mdi:delete-outline
 const REPLAY_BATCH_MS = 250; // like the integration's live push
 const SVG_NS = "http://www.w3.org/2000/svg";
 const CHART_HEIGHT = 200; // default; also the minimum in fill mode
@@ -186,6 +217,10 @@ const FLOW_SMOOTHING_MAX = 10;
 // before it flow is 0, so the centred window shows no flow before the drops.
 const FLOW_START_DELTA = 1.0;
 const FLOW_MIN_POINTS = 3; // fewer points in the window: flow 0
+// Smoothed flow line of stored brews (see the header).
+const TREND_SIGMA = 2.5; // s, Gaussian kernel of the local slope
+const TREND_SPIKE_K = 2; // neighbours on each side for the outlier median
+const TREND_SPIKE_G = 1.0; // g away from that median: outlier frame
 const reducedMotion = () =>
   typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -303,6 +338,84 @@ function smoothedFlow(times, weights, window) {
   return out;
 }
 
+// Replace single outlier frames by the median of their neighbourhood. The
+// window is symmetric (shrunk at the edges), so a steady rise is left alone.
+function despike(values, k = TREND_SPIKE_K, limit = TREND_SPIKE_G) {
+  const n = values.length;
+  return values.map((v, i) => {
+    const kk = Math.min(k, i, n - 1 - i);
+    if (kk < 1) return v;
+    const win = values.slice(i - kk, i + kk + 1).sort((a, b) => a - b);
+    const m = win.length % 2 ? win[(win.length - 1) / 2] : (win[win.length / 2 - 1] + win[win.length / 2]) / 2;
+    return Math.abs(v - m) > limit ? m : v;
+  });
+}
+
+// Least-squares non-decreasing fit (pool adjacent violators).
+function isotonic(values) {
+  const blocks = []; // [mean, count]
+  for (const v of values) {
+    blocks.push([v, 1]);
+    while (blocks.length > 1 && blocks[blocks.length - 2][0] > blocks[blocks.length - 1][0]) {
+      const [m2, n2] = blocks.pop();
+      const b = blocks[blocks.length - 1];
+      b[0] = (b[0] * b[1] + m2 * n2) / (b[1] + n2);
+      b[1] += n2;
+    }
+  }
+  const out = [];
+  for (const [m, n] of blocks) for (let i = 0; i < n; i++) out.push(m);
+  return out;
+}
+
+// Smoothed flow of a stored brew: [[t, flow], ...] from the first drop to
+// `end` (the stored duration; all points without one). Centred Gaussian
+// local linear slope of the despiked, isotonic weight; never negative.
+function trendFlow(points, end, sigma = TREND_SIGMA) {
+  const upTo = end ? points.filter((p) => p[0] <= end + 1e-9) : points;
+  if (upTo.length < FLOW_MIN_POINTS) return [];
+  const all = isotonic(despike(upTo.map((p) => p[1])));
+  const first = all.findIndex((w) => w > all[0] + FLOW_START_DELTA);
+  if (first < 0 || upTo.length - first < FLOW_MIN_POINTS) return [];
+  const times = upTo.slice(first).map((p) => p[0]);
+  const weights = all.slice(first);
+  const reach = 3 * sigma;
+  return times.map((t0) => {
+    let sk = 0;
+    let sd = 0;
+    let swt = 0;
+    for (let j = 0; j < times.length; j++) {
+      const d = times[j] - t0;
+      if (Math.abs(d) > reach) continue;
+      const k = Math.exp(-0.5 * (d / sigma) ** 2);
+      sk += k;
+      sd += k * d;
+      swt += k * weights[j];
+    }
+    const md = sd / sk;
+    const mw = swt / sk;
+    let num = 0;
+    let den = 0;
+    for (let j = 0; j < times.length; j++) {
+      const d = times[j] - t0;
+      if (Math.abs(d) > reach) continue;
+      const k = Math.exp(-0.5 * (d / sigma) ** 2);
+      num += k * (d - md) * (weights[j] - mw);
+      den += k * (d - md) ** 2;
+    }
+    return [t0, den > 0 ? Math.max(0, num / den) : 0];
+  });
+}
+
+// Smoothed point at time t (same timestamps as the raw points); none after
+// the line's end.
+function trendAt(trend, t) {
+  if (!trend || !trend.length || t > trend[trend.length - 1][0] + 1e-9) return null;
+  let best = trend[0];
+  for (const p of trend) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+  return best;
+}
+
 // Points as drawn: [t, monotone weight, flow from weight]; the raw points
 // unchanged for smoothing 0.
 function displayProfile(points, smoothing) {
@@ -404,6 +517,8 @@ class DifluidBrewCard extends HTMLElement {
     this._index = 0;
     this._cache = new Map(); // brew id -> full brew
     this._error = null;
+    this._confirm = null; // brew asked to delete: { id, start, busy, error }
+    this._pendingDelete = null; // { id, keep }: delete call running
     this._unsub = null;
     this._loadToken = 0;
     this._hover = null;
@@ -418,6 +533,7 @@ class DifluidBrewCard extends HTMLElement {
     this._readyTarget = null; // its auto-stop target in g (live_ready)
     this._smoothing = FLOW_SMOOTHING_DEFAULT;
     this._displayCache = new WeakMap(); // points array -> displayed points
+    this._trendCache = new WeakMap(); // stored brew -> smoothed flow line
     this._readyConn = null;
     this._onReady = () => {
       // Reconnected: make what failed meanwhile, then reload.
@@ -511,6 +627,9 @@ class DifluidBrewCard extends HTMLElement {
     const changed =
       JSON.stringify(scaleOf(config)) !== JSON.stringify(scaleOf(this._config));
     this._config = { ...config };
+    // A confirmation or a delete in flight belongs to the old config.
+    this._confirm = null;
+    this._pendingDelete = null;
     this._setHeightMode(heightMode);
     if (changed) {
       this._brews = null;
@@ -1161,7 +1280,130 @@ class DifluidBrewCard extends HTMLElement {
     if (msg && msg.last) this._cache.delete(msg.last.id);
     const viewingLatest = this._index === 0;
     const currentId = this._brews && this._brews[this._index]?.id;
+    const pending = this._pendingDelete;
+    if (pending && currentId === pending.id) {
+      // Our own delete: go on to its neighbour, not to the newest brew.
+      this._load(pending.keep);
+      return;
+    }
     this._load(viewingLatest ? null : currentId);
+  }
+
+  // --------------------------------------------------------------- delete
+
+  _askDelete() {
+    if (this._live || this._readyView() || !this._brews) return;
+    const summary = this._brews[this._index];
+    if (!summary) return;
+    this._confirm = {
+      id: summary.id,
+      start: summary.start,
+      learned: summary.learned === true, // in the auto-stop learning journal
+      busy: false,
+      error: null,
+    };
+    this._render();
+    this._els.confirmCancel.focus?.();
+  }
+
+  _cancelDelete() {
+    if (!this._confirm || this._confirm.busy) return;
+    this._confirm = null;
+    this._render();
+  }
+
+  // "23.11. 19:47" (de) / "Nov 23, 7:47 PM" (en): the brew start, local time.
+  _deleteWhen(start) {
+    const d = new Date(start);
+    const l = lang(this._hass);
+    const date = d.toLocaleDateString(
+      l,
+      l === "de" ? { day: "2-digit", month: "2-digit" } : { day: "numeric", month: "short" }
+    );
+    const time = d.toLocaleTimeString(l, { hour: "2-digit", minute: "2-digit" });
+    return l === "de" ? `${date} ${time}` : `${date}, ${time}`;
+  }
+
+  _renderConfirm() {
+    const e = this._els;
+    const c = this._confirm;
+    e.confirm.classList.toggle("hidden", !c);
+    if (!c) return;
+    const ask = this._t("delete_confirm").replace("{when}", this._deleteWhen(c.start));
+    e.confirmText.textContent = c.learned ? `${ask} ${this._t("delete_confirm_learned")}` : ask;
+    e.confirmError.textContent = c.error || "";
+    e.confirmError.classList.toggle("hidden", !c.error);
+    e.confirmCancel.textContent = this._t("delete_cancel");
+    e.confirmOk.textContent = this._t("delete_ok");
+    e.confirmCancel.disabled = c.busy;
+    e.confirmOk.disabled = c.busy;
+  }
+
+  // A failed service call's message in the UI language (the integration's
+  // translated exception, as HA's own toast does), else its raw message.
+  async _serviceError(err) {
+    const key = err && err.translation_key;
+    const hass = this._hass;
+    if (key && hass && typeof hass.loadBackendTranslation === "function") {
+      try {
+        const domain = err.translation_domain || DOMAIN;
+        const localize = (await hass.loadBackendTranslation("exceptions", domain)) || hass.localize;
+        const text =
+          typeof localize === "function" &&
+          localize(`component.${domain}.exceptions.${key}.message`, err.translation_placeholders || {});
+        if (text) return text;
+      } catch (_e) {
+        // fall through to the raw message
+      }
+    }
+    return (err && err.message) || this._t("delete_error");
+  }
+
+  async _confirmDelete() {
+    const c = this._confirm;
+    if (!c || c.busy || !this._hass) return;
+    const brews = this._brews || [];
+    const idx = brews.findIndex((b) => b.id === c.id);
+    // Next older brew, else the newer one, else none (empty state).
+    const neighbour = idx >= 0 ? brews[idx + 1] || brews[idx - 1] || null : null;
+    const keep = neighbour ? neighbour.id : null;
+    c.busy = true;
+    c.error = null;
+    const pending = { id: c.id, keep };
+    this._pendingDelete = pending;
+    this._renderConfirm();
+    try {
+      // No HA toast (notifyOnError false): the card shows the error.
+      await this._hass.callService(
+        DOMAIN,
+        "delete_brew",
+        { brew_id: c.id, ...scaleOf(this._config) },
+        undefined,
+        false
+      );
+    } catch (err) {
+      if (this._pendingDelete === pending) this._pendingDelete = null;
+      const message = await this._serviceError(err);
+      if (this._confirm === c) {
+        c.busy = false;
+        c.error = message;
+        this._render();
+      }
+      return;
+    }
+    // setConfig meanwhile (other scale): its state is not ours to change.
+    if (this._pendingDelete !== pending) return;
+    this._pendingDelete = null;
+    if (this._confirm === c) this._confirm = null;
+    this._cache.delete(c.id);
+    if (this._brews) {
+      this._brews = this._brews.filter((b) => b.id !== c.id);
+      const k = keep ? this._brews.findIndex((b) => b.id === keep) : -1;
+      this._index = k > 0 ? k : 0;
+    }
+    this._hover = null;
+    this._render();
+    this._load(keep);
   }
 
   async _load(keepId) {
@@ -1600,6 +1842,7 @@ class DifluidBrewCard extends HTMLElement {
         .legend .key { display: inline-flex; align-items: center; gap: 6px; }
         .legend .swatch { width: 14px; height: 0; border-top: 2px solid; }
         .legend .flow .swatch { border-color: var(--primary-color); }
+        .legend .trend .swatch { border-color: var(--primary-color); border-top-style: dotted; }
         .legend .weight .swatch { border-color: var(--secondary-text-color); border-top-style: dashed; }
         .legend .readout { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--primary-text-color); }
         .chart { position: relative; height: ${CHART_HEIGHT}px; touch-action: pan-y; }
@@ -1608,6 +1851,16 @@ class DifluidBrewCard extends HTMLElement {
         .title { display: flex; align-items: center; gap: 8px; }
         .nav.replaying .prev, .nav.replaying .next, .nav.replaying .pos { display: none; }
         .nav .replay svg { width: 20px; height: 20px; }
+        .nav .delete svg { width: 20px; height: 20px; }
+        .nav.replaying .delete { display: none; }
+        ha-card { position: relative; }
+        .confirm { position: absolute; inset: 0; z-index: 1; display: grid; place-items: center; padding: 16px; border-radius: inherit; background: color-mix(in srgb, var(--ha-card-background, var(--card-background-color)) 85%, transparent); }
+        .confirm-box { max-width: 320px; display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 12px; background: var(--ha-card-background, var(--card-background-color)); border: 1px solid var(--divider-color); color: var(--primary-text-color); font-size: 0.95rem; line-height: 1.4; }
+        .confirm-error { font-size: 0.85rem; color: var(--error-color); }
+        .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+        .confirm-actions button { width: auto; height: 36px; padding: 0 12px; border-radius: 18px; font-weight: 500; }
+        .confirm-actions .confirm-cancel { color: var(--primary-color); }
+        .confirm-actions .confirm-ok { color: var(--error-color); }
         .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--primary-color); padding: 1px 8px 1px 6px; border-radius: 999px; border: 1px solid currentColor; line-height: 1.4; }
         .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-in-out infinite; }
         .badge.parked { color: var(--warning-color, var(--secondary-text-color)); }
@@ -1637,6 +1890,7 @@ class DifluidBrewCard extends HTMLElement {
             <div class="detail invisible"></div>
           </div>
           <div class="nav">
+            <button class="delete"><svg viewBox="0 0 24 24"><path d="${ICON_DELETE}"></path></svg></button>
             <button class="replay"><svg viewBox="0 0 24 24"><path d="${ICON_PLAY}"></path></svg></button>
             <button class="prev"><svg viewBox="0 0 24 24"><path d="${ICON_LEFT}"></path></svg></button>
             <span class="pos"></span>
@@ -1648,6 +1902,16 @@ class DifluidBrewCard extends HTMLElement {
         <div class="stats"></div>
         <div class="legend"></div>
         <div class="chart"></div>
+        <div class="confirm hidden" role="alertdialog" aria-modal="true">
+          <div class="confirm-box">
+            <div class="confirm-text"></div>
+            <div class="confirm-error hidden" role="alert"></div>
+            <div class="confirm-actions">
+              <button class="confirm-cancel"></button>
+              <button class="confirm-ok"></button>
+            </div>
+          </div>
+        </div>
       </ha-card>`;
     const $ = (s) => this.shadowRoot.querySelector(s);
     this._els = {
@@ -1661,6 +1925,12 @@ class DifluidBrewCard extends HTMLElement {
       prev: $(".prev"),
       replay: $(".replay"),
       replayIcon: $(".replay path"),
+      del: $(".delete"),
+      confirm: $(".confirm"),
+      confirmText: $(".confirm-text"),
+      confirmError: $(".confirm-error"),
+      confirmCancel: $(".confirm-cancel"),
+      confirmOk: $(".confirm-ok"),
       next: $(".next"),
       pos: $(".pos"),
       message: $(".message"),
@@ -1676,6 +1946,9 @@ class DifluidBrewCard extends HTMLElement {
     this._els.prev.addEventListener("click", () => this._step(1));
     this._els.next.addEventListener("click", () => this._step(-1));
     this._els.replay.addEventListener("click", () => this._toggleReplay());
+    this._els.del.addEventListener("click", () => this._askDelete());
+    this._els.confirmCancel.addEventListener("click", () => this._cancelDelete());
+    this._els.confirmOk.addEventListener("click", () => this._confirmDelete());
     this._chartBox.addEventListener("pointermove", (ev) => this._onPointer(ev));
     this._chartBox.addEventListener("pointerleave", () => {
       this._hover = null;
@@ -1722,7 +1995,13 @@ class DifluidBrewCard extends HTMLElement {
     e.replay.setAttribute("aria-label", replayLabel);
     e.replayIcon.setAttribute("d", replaying ? ICON_STOP : ICON_PLAY);
     e.nav.classList.toggle("replaying", replaying);
+    e.del.title = this._t("delete");
+    e.del.setAttribute("aria-label", this._t("delete"));
     if (this._live || readyView) {
+      // Deleting is for stored brews only: a brew (or replay) taking over
+      // the card drops an open confirmation.
+      if (this._confirm && !this._confirm.busy) this._confirm = null;
+      e.confirm.classList.add("hidden");
       // Space kept (not hidden): the header does not jump at the brew end.
       e.detail.classList.add("invisible");
       e.message.classList.add("hidden");
@@ -1748,6 +2027,8 @@ class DifluidBrewCard extends HTMLElement {
     for (const el of [e.stats, e.legend, this._chartBox, e.nav]) {
       el.classList.toggle("hidden", !showData);
     }
+    if (!showData && this._confirm && !this._confirm.busy) this._confirm = null;
+    this._renderConfirm();
     if (!showData) {
       e.when.textContent = "";
       e.detail.classList.add("invisible");
@@ -1760,6 +2041,7 @@ class DifluidBrewCard extends HTMLElement {
     e.prev.disabled = this._index >= total - 1;
     e.replay.disabled = !((this._currentBrew() || {}).profile || []).length;
     e.next.disabled = this._index <= 0;
+    e.del.disabled = !!this._confirm;
     e.when.textContent = new Date(summary.start).toLocaleString(lang(this._hass), {
       weekday: "short",
       day: "numeric",
@@ -1860,14 +2142,25 @@ class DifluidBrewCard extends HTMLElement {
     const e = this._els;
     if (!e) return;
     let readout = "";
+    const trend = !this._live && !this._readyView() ? this._chartBrew()?.trend || [] : [];
     if (this._hover) {
       const [t, w, f] = this._hover;
-      readout = `${this._fmt(t, 1)} s · ${this._fmt(f, 1)} g/s · ${this._fmt(w, 1)} g`;
+      const tp = trendAt(trend, t);
+      const smooth = tp ? ` (Ø ${this._fmt(tp[1], 1)})` : "";
+      readout = `${this._fmt(t, 1)} s · ${this._fmt(f, 1)} g/s${smooth} · ${this._fmt(w, 1)} g`;
     }
-    e.legend.innerHTML = `
+    const trendKey = trend.length
+      ? `<span class="key trend"><span class="swatch"></span>${this._t("trend")}</span>`
+      : "";
+    // A picked point replaces the keys, so the row never wraps on a phone
+    // (the chart height counts the legend and would jump).
+    e.legend.innerHTML = readout
+      ? `<span class="readout">${readout}</span>`
+      : `
       <span class="key flow"><span class="swatch"></span>${this._t("flow")} (g/s)</span>
+      ${trendKey}
       <span class="key weight"><span class="swatch"></span>${this._t("weight")} (g)</span>
-      <span class="readout">${readout}</span>`;
+      <span class="readout"></span>`;
   }
 
   _currentBrew() {
@@ -1886,7 +2179,13 @@ class DifluidBrewCard extends HTMLElement {
     const brew = this._currentBrew();
     if (!brew) return null;
     const pts = this._display(brew.profile || []);
-    return { ...brew, profile: brew.live ? this._liveVisible(pts) : pts };
+    if (brew.live) return { ...brew, profile: this._liveVisible(pts) };
+    let trend = this._trendCache.get(brew);
+    if (!trend) {
+      trend = trendFlow(brew.profile || [], brew.duration);
+      this._trendCache.set(brew, trend);
+    }
+    return { ...brew, profile: pts, trend };
   }
 
   _geometry(brew) {
@@ -1919,6 +2218,7 @@ class DifluidBrewCard extends HTMLElement {
         if (p[2] > fPeak) fPeak = p[2];
         if (p[1] > wPeak) wPeak = p[1];
       }
+      for (const p of brew.trend || []) if (p[1] > fPeak) fPeak = p[1];
       tAxis = axis(pts.length ? pts[pts.length - 1][0] : 0, 5, tCount);
       fAxis = axis(fPeak, 1, 4);
       wAxis = axis(wPeak, 10, 4);
@@ -2050,6 +2350,19 @@ class DifluidBrewCard extends HTMLElement {
         "stroke-linecap": "round",
       })
     );
+    if (brew.trend && brew.trend.length) {
+      svg.appendChild(
+        svgEl("path", {
+          d: monotonePath(brew.trend.map((p) => [g.x(p[0]), g.yF(p[1])])),
+          fill: "none",
+          stroke: "var(--primary-color)",
+          "stroke-width": 1.5,
+          "stroke-dasharray": "1 4",
+          "stroke-linejoin": "round",
+          "stroke-linecap": "round",
+        })
+      );
+    }
 
     if (brew.live) {
       // "Now" marker at the newest flow point.
@@ -2096,6 +2409,12 @@ class DifluidBrewCard extends HTMLElement {
           fill: "var(--secondary-text-color)",
         })
       );
+      const tp = trendAt(brew.trend, t);
+      if (tp) {
+        svg.appendChild(
+          svgEl("circle", { cx: xh, cy: g.yF(tp[1]), r: 3, fill: "var(--primary-color)" })
+        );
+      }
     }
     box.appendChild(svg);
   }
@@ -2186,7 +2505,7 @@ class DifluidBrewCardEditor extends HTMLElement {
 }
 
 // Pure helpers, for tests (tests/card_flow_test.mjs).
-DifluidBrewCard.math = { monotone, smoothedFlow, displayProfile, parseFlowSmoothing };
+DifluidBrewCard.math = { monotone, smoothedFlow, displayProfile, parseFlowSmoothing, despike, isotonic, trendFlow };
 
 if (!customElements.get("difluid-brew-card")) {
   customElements.define("difluid-brew-card", DifluidBrewCard);

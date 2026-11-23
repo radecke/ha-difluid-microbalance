@@ -15,6 +15,13 @@ turned off) or ``switch_failed`` (the service call raised or the switch is
 missing/unavailable; reported only, the attempt continues unchanged), then
 once the attempt is concluded the conclusion (``learned`` or a reason).
 
+The stop switch latency (turn_off call -> the switch reports ``off``) is
+measured per cut (see ``_SwitchProbe``) and taken out of learning: the
+sample is corrected to the nominal switch latency (``adjusted_overshoot``),
+and a cut whose latency is unknown is not learned. The ``cut`` event fires
+when the service call returns, usually before the switch reports, so it
+carries no latency; the conclusion events carry ``switch_latency``.
+
 The targets (ratio, yield) and the active bean are integration state kept in
 this module's store, so they do not depend on the number entities being
 enabled (restore state); see ``async_load`` for the one-time migration.
@@ -24,21 +31,33 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 import logging
+import math
+import time
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 
-from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_OFF, Platform
+from homeassistant.const import (
+    ATTR_ENTITY_ID,
+    SERVICE_TURN_OFF,
+    STATE_OFF,
+    STATE_UNAVAILABLE,
+    Platform,
+)
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     EventStateChangedData,
+    async_call_later,
     async_track_state_change_event,
 )
 from homeassistant.helpers.restore_state import async_get as async_get_restore
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .beans import (
     BEAN_NAME,
@@ -53,13 +72,16 @@ from .brew import BREWING, TAIL_DROP_GRAMS, BrewResult
 from .const import (
     CONF_STOP_SWITCH,
     DOMAIN,
+    SIGNAL_BREWS_UPDATED,
     STOP_STORAGE_KEY,
     STOP_STORAGE_MINOR_VERSION,
     STOP_STORAGE_VERSION,
 )
 from .issues import (
     MODE_RUNTIME,
+    async_clear_switch_latency_issue,
     async_update_stop_switch_issue,
+    async_update_switch_latency_issue,
     stop_switch_ok,
 )
 from .protocol import DeviceState
@@ -68,13 +90,17 @@ from .stop_model import (
     FLOW_MIN_FRAMES,
     FLOW_WINDOW,
     OVERSHOOT_MAX,
+    SWITCH_LATENCY_TIMEOUT,
     TIMER_STOP_MAX,
     Cut,
     FlowEstimator,
     IntervalEstimator,
+    LearningJournal,
     SampleFilter,
     SettleDetector,
     StopModel,
+    SwitchLatencies,
+    adjusted_overshoot,
     plausible_flow,
 )
 
@@ -91,6 +117,10 @@ REASON_NOT_SETTLED = "not_settled"
 REASON_DISCARDED = "brew_discarded"
 REASON_TRUNCATED = "brew_truncated"
 REASON_CUP_LIFTED = "cup_lifted"
+# The stop switch did not report ``off`` within SWITCH_LATENCY_TIMEOUT (or
+# was not ``on`` at the cut, or the call failed): the overshoot cannot be
+# separated from the switch's delay.
+REASON_NO_SWITCH_LATENCY = "switch_latency_unknown"
 
 # Event types of the "Auto-stop" event entity.
 EVENT_CUT = "cut"
@@ -105,6 +135,7 @@ AUTOSTOP_EVENT_TYPES = [
     REASON_DISCARDED,
     REASON_TRUNCATED,
     REASON_CUP_LIFTED,
+    REASON_NO_SWITCH_LATENCY,
 ]
 
 # Settings keys in the store.
@@ -115,12 +146,109 @@ SETTING_BEAN = "bean_id"
 type AutoStopEventListener = Callable[[str, dict[str, Any]], None]
 
 
+class _SwitchProbe:
+    """Measures one cut's stop switch latency: from just before the
+    turn_off call is issued until the switch's state becomes ``off``.
+
+    The state listener is set up before the call (a fast report, even one
+    that arrives before the call returns, is not missed). The result is
+    reported once via ``on_done``: the latency in s (3 decimals) once the
+    call returned without error and the ``off`` report is in; None when the
+    call failed or no report came within SWITCH_LATENCY_TIMEOUT of the
+    start. ``cancel`` (unload) drops listener and timer without a result.
+    Never in the way of the switch-off itself (only a listener and a timer).
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        switch: str,
+        on_done: Callable[[float | None], None],
+    ) -> None:
+        self._hass = hass
+        self._on_done = on_done
+        self._t0: float | None = None
+        self._reported: float | None = None
+        self._call_ok: bool | None = None
+        self.done = False
+        self._unsub_state: CALLBACK_TYPE | None = async_track_state_change_event(
+            hass, [switch], self._state_changed
+        )
+        self._unsub_timer: CALLBACK_TYPE | None = None
+
+    @callback
+    def start(self) -> None:
+        """Right before the call is issued: the measurement starts."""
+        self._t0 = time.monotonic()
+        self._unsub_timer = async_call_later(
+            self._hass, SWITCH_LATENCY_TIMEOUT, self._timed_out
+        )
+
+    @callback
+    def _state_changed(self, event: Event[EventStateChangedData]) -> None:
+        new = event.data["new_state"]
+        if self._reported is None and new is not None and new.state == STATE_OFF:
+            self._reported = time.monotonic()
+            self._check()
+
+    @callback
+    def call_done(self, ok: bool) -> None:
+        """The service call returned (``ok``) or raised."""
+        self._call_ok = ok
+        self._check()
+
+    @callback
+    def _check(self) -> None:
+        if self._call_ok is False:
+            self.finish(None)
+        elif self._call_ok and self._reported is not None and self._t0 is not None:
+            latency = self._reported - self._t0
+            self.finish(
+                round(latency, 3) if latency <= SWITCH_LATENCY_TIMEOUT else None
+            )
+
+    @callback
+    def _timed_out(self, _now: datetime) -> None:
+        self._unsub_timer = None
+        self.finish(None)
+
+    @callback
+    def finish(self, latency: float | None) -> None:
+        """End now with ``latency`` (once; later results are ignored)."""
+        if self.done:
+            return
+        self.cancel()
+        self._on_done(latency)
+
+    @callback
+    def cancel(self) -> None:
+        """Stop listening (idempotent); no result after this."""
+        self.done = True
+        if self._unsub_state is not None:
+            self._unsub_state()
+            self._unsub_state = None
+        if self._unsub_timer is not None:
+            self._unsub_timer()
+            self._unsub_timer = None
+
+
+def _iso(start: float) -> str:
+    """A brew start (tracker clock, epoch s) as stored with the brew."""
+    return datetime.fromtimestamp(start, UTC).isoformat()
+
+
 class StopStore(Store[dict[str, Any]]):
     """Stop learning store with version migration.
 
     1.1 -> 1.2 (0.5.0): ``settings`` added. The migration leaves it out;
     ``AutoStop.async_load`` fills it once from the number entities' restore
     state (it needs the entity registry, not available here).
+    0.5.1: optional ``switch_latency`` (measured stop switch latencies);
+    missing in older data = none measured yet, so no version step.
+    0.5.1: optional ``journal`` (``LearningJournal.to_dict``: ``base``
+    model and the accepted samples, for deleting a brew from the learning);
+    missing = learned before the journal: the model stays, the journal
+    starts empty on it, so no version step.
     """
 
     async def _async_migrate_func(
@@ -140,7 +268,10 @@ class AutoStop:
         """Initialize."""
         self.hass = hass
         self.coordinator = coordinator
+        self._entry_id = entry_id
         self.model = StopModel()
+        # Accepted samples of the model (replayed when one is taken out).
+        self.journal = LearningJournal()
         self.target = 0.0
         self.ratio = 0.0
         # Active bean profile (id into the options' bean list), None = none.
@@ -153,6 +284,11 @@ class AutoStop:
         self._brew_bean: str | None = None
         # (brew start, target, source) of the last cut: the stored target.
         self._last_cut_target: tuple[float, float, str, float] | None = None
+        # (brew start, measured switch latency) of the last cut whose
+        # measurement finished: the stored brew's ``switch_latency``.
+        self._last_cut_latency: tuple[float, float | None] | None = None
+        # Brew start of the cut ``last`` describes (this run only).
+        self._last_start: float | None = None
         # Last cut brew (cut values, settled yield, accepted or why not).
         self.last: dict[str, Any] | None = None
         self._store = StopStore(
@@ -185,6 +321,11 @@ class AutoStop:
         self._listeners: list[CALLBACK_TYPE] = []
         self._event_listeners: list[AutoStopEventListener] = []
         self._unsub_switch: CALLBACK_TYPE | None = None
+        # Stop switch latencies of the last cuts (nominal = their median)
+        # and the latest cut's measurement (None: unknown, see _SwitchProbe).
+        self.latencies = SwitchLatencies()
+        self.last_switch_latency: float | None = None
+        self._probe: _SwitchProbe | None = None
 
     # ------------------------------------------------------------ config
 
@@ -340,6 +481,7 @@ class AutoStop:
         async_update_stop_switch_issue(
             self.hass, self.coordinator.config_entry, switch, mode
         )
+        self._async_update_latency_issue()
         if switch is None:
             return
 
@@ -357,10 +499,59 @@ class AutoStop:
 
     @callback
     def async_stop_watching(self) -> None:
-        """Stop following the switch (unload)."""
+        """Stop following the switch and drop a running latency
+        measurement (unload)."""
         if self._unsub_switch is not None:
             self._unsub_switch()
             self._unsub_switch = None
+        if self._probe is not None:
+            self._probe.cancel()
+            self._probe = None
+        async_clear_switch_latency_issue(
+            self.hass, self.coordinator.config_entry.entry_id
+        )
+
+    @callback
+    def _async_update_latency_issue(self) -> None:
+        """Repair issue while the configured switch's last cuts all ended
+        without an ``off`` report in time (learning has stopped)."""
+        switch = self.switch_entity
+        async_update_switch_latency_issue(
+            self.hass,
+            self.coordinator.config_entry,
+            switch,
+            self.latencies.unknown_streak
+            if switch is not None and switch == self.latencies.entity_id
+            else 0,
+        )
+
+    @property
+    def nominal_switch_latency(self) -> float:
+        """Nominal stop switch latency (s) of the configured switch."""
+        return self.latencies.nominal(self.switch_entity)
+
+    def switch_latency_for(self, start: float | None) -> float | None:
+        """Measured stop switch latency of the cut in the brew that started
+        at ``start`` (None: no cut there, not measured (yet), or unknown)."""
+        cut = self._cut
+        if cut is not None and start is not None and cut.start == start:
+            return cut.switch_latency
+        last = self._last_cut_latency
+        if last is not None and start is not None and last[0] == start:
+            return last[1]
+        return None
+
+    def switch_latency_unknown_for(self, start: float | None) -> bool:
+        """The brew that started at ``start`` was cut and its switch latency
+        measurement ended without a value (False: no cut, measured, or
+        still pending)."""
+        last = self._last_cut_latency
+        return (
+            last is not None
+            and start is not None
+            and last[0] == start
+            and last[1] is None
+        )
 
     def effective_target(self) -> tuple[float, str, float | None]:
         """Target for the running brew: ratio x detected dose, else the
@@ -486,6 +677,8 @@ class AutoStop:
             bean=self.brew_bean(start),
             clean=self._flow.count >= FLOW_MIN_FRAMES
             and (disturbed is None or disturbed < t - FLOW_WINDOW),
+            nominal_latency=self.latencies.nominal(switch),
+            latency_pending=switch is not None,
         )
         self._settle = SettleDetector()
         self._settle.feed(t, weight)
@@ -516,6 +709,28 @@ class AutoStop:
         # Checked first: a missing or unavailable entity is skipped by the
         # service call without an error.
         ok = stop_switch_ok(self.hass, switch)
+        # Latency measured unless the switch is off already, unavailable or
+        # missing. ``unknown`` is measured too: the plug is briefly unknown
+        # after a Home Assistant restart while a shot evidently runs, and
+        # its ``off`` report then is the answer to this call.
+        state = self.hass.states.get(switch)
+        probe: _SwitchProbe | None = None
+        if state is not None and state.state not in (STATE_OFF, STATE_UNAVAILABLE):
+            if self._probe is not None:
+                # A previous cut still waits: it ends unknown, never pending
+                # forever.
+                self._probe.finish(None)
+            probe = self._probe = _SwitchProbe(
+                self.hass,
+                switch,
+                lambda latency: self._switch_latency_known(
+                    cut, switch, latency, probed=True
+                ),
+            )
+            # Measurement start: right before the call is issued. This task
+            # is started eagerly from the sample handler (_fire), so this is
+            # the cut decision plus only the checks above.
+            probe.start()
         # Shielded: an unload cancelling this task mid-cut must never abort
         # switching the machine off (only what follows is skipped).
         call = self.hass.async_create_task(
@@ -532,7 +747,9 @@ class AutoStop:
         except (HomeAssistantError, vol.Invalid) as err:
             _LOGGER.warning("Auto-stop could not turn off %s: %s", switch, err)
             ok = False
+            call_ok = False
         else:
+            call_ok = True
             if not ok:
                 _LOGGER.warning(
                     "Auto-stop: stop switch %s is missing or unavailable", switch
@@ -543,6 +760,48 @@ class AutoStop:
             self.hass, self.coordinator.config_entry, None if ok else switch
         )
         self._fire_event(EVENT_CUT if ok else EVENT_SWITCH_FAILED, cut)
+        if probe is not None:
+            probe.call_done(call_ok)
+        else:
+            self._switch_latency_known(cut, switch, None)
+
+    @callback
+    def _switch_latency_known(
+        self, cut: Cut, switch: str, latency: float | None, probed: bool = False
+    ) -> None:
+        """A cut's latency measurement ended (``latency`` None: unknown;
+        ``probed``: a measurement ran, i.e. the switch did not report in
+        time or the call failed, rather than it being off/unavailable)."""
+        if self.coordinator.unloading or not cut.latency_pending:
+            return
+        if self._probe is not None and self._probe.done:
+            self._probe = None
+        cut.latency_pending = False
+        cut.switch_latency = latency
+        self.last_switch_latency = latency
+        self._last_cut_latency = (cut.start, latency)
+        if latency is not None or probed:
+            self.latencies.add(switch, latency)
+            self._async_update_latency_issue()
+        if latency is not None:
+            _LOGGER.debug(
+                "%s: stop switch %s reported off after %.3f s (nominal %.3f s)",
+                self.coordinator.address, switch, latency, cut.nominal_latency,
+            )
+        else:
+            _LOGGER.debug(
+                "%s: stop switch %s latency unknown (off or unavailable at "
+                "the cut, call failed or no off report within %.0f s)",
+                self.coordinator.address, switch, SWITCH_LATENCY_TIMEOUT,
+            )
+        # A brew stored before the measurement ended gets it now.
+        self.coordinator.brews.async_set_switch_latency(cut.start, latency)
+        if self._cut is cut:
+            self._maybe_learn()
+        elif self.last is not None and self._last_start == cut.start:
+            # Concluded before the measurement ended (not learned anyway).
+            self.last["switch_latency"] = latency
+        self._async_changed()
 
     async def _async_stop_timer(self) -> None:
         """Stop the scale timer, but only while it is timing.
@@ -672,10 +931,24 @@ class AutoStop:
         cut = self._cut
         if cut is None or self._final is None or not self._brew_ok:
             return
-        overshoot = self._final - cut.weight
+        if cut.latency_pending:
+            return  # learned once the switch latency is known (<= timeout)
+        if cut.switch_latency is None:
+            # The switch's share of the overshoot is unknown: not learned.
+            self._conclude(self._final, REASON_NO_SWITCH_LATENCY)
+            return
+        overshoot = adjusted_overshoot(
+            self._final - cut.weight,
+            cut.flow,
+            cut.switch_latency,
+            cut.nominal_latency,
+        )
         # A dropped frame or level change just before the cut, or a flow
-        # outside the plausible range: an outlier, nothing learned.
+        # or (adjusted) overshoot outside the plausible range: an outlier,
+        # nothing learned.
         accepted = cut.clean and self.model.update(cut.flow, overshoot)
+        if accepted:
+            self._journal_add(cut.flow, overshoot, _iso(cut.start))
         self._conclude(self._final, None if accepted else REASON_OUTLIER)
 
     @callback
@@ -700,7 +973,24 @@ class AutoStop:
             # False: dropped frame, level change or gap just before the cut.
             "clean_cut": cut.clean,
             "bean": cut.bean,
+            # Measured stop switch latency (None: unknown or, concluded
+            # within the measurement, not yet known), the nominal one the
+            # sample was corrected to, and the corrected overshoot.
+            "switch_latency": cut.switch_latency,
+            "nominal_switch_latency": round(cut.nominal_latency, 3),
+            "adjusted_overshoot": None
+            if final is None or cut.switch_latency is None
+            else round(
+                adjusted_overshoot(
+                    final - cut.weight,
+                    cut.flow,
+                    cut.switch_latency,
+                    cut.nominal_latency,
+                ),
+                2,
+            ),
         }
+        self._last_start = cut.start
         _LOGGER.debug("%s: auto-stop result %s", self.coordinator.address, self.last)
         self._fire_event(
             EVENT_LEARNED if reason is None else reason, cut, final=final
@@ -723,6 +1013,10 @@ class AutoStop:
             "deviation": None if final is None else round(final - cut.target, 1),
             "bean": cut.bean,
         }
+        if event_type not in (EVENT_CUT, EVENT_SWITCH_FAILED):
+            # Conclusions only: the cut event fires when the call returns,
+            # usually before the switch reported off.
+            data["switch_latency"] = cut.switch_latency
         for listener in list(self._event_listeners):
             try:
                 listener(event_type, data)
@@ -743,31 +1037,147 @@ class AutoStop:
 
         return _remove
 
+    def _journal_add(
+        self,
+        flow: float,
+        overshoot: float,
+        start: str | None,
+        brew_id: str | None = None,
+    ) -> None:
+        """Journal a sample just learned by ``self.model.update``."""
+        if brew_id is None and start is not None:
+            # Live cuts are usually learned just before their brew is
+            # stored: the id follows in async_brew_stored.
+            brew = self.coordinator.brews.find_start(start)
+            brew_id = brew["id"] if brew is not None else None
+        self.journal.add(
+            LearningJournal.entry(
+                flow, overshoot, brew_id, start, dt_util.utcnow().isoformat()
+            )
+        )
+        self._learned_changed()
+
     @callback
-    def async_learn(self, flow: float, overshoot: float) -> bool:
+    def _learned_changed(self) -> None:
+        """Which brews are learned changed: the card reloads the brew list
+        (its ``learned`` flags) on the brews signal."""
+        async_dispatcher_send(
+            self.hass, SIGNAL_BREWS_UPDATED.format(self._entry_id)
+        )
+
+    def learned(self, brew: dict[str, Any]) -> bool:
+        """The brew has a sample in the learning journal (deleting it takes
+        that sample out of the model)."""
+        return self.journal.index_of(brew.get("id"), brew.get("start")) is not None
+
+    @callback
+    def async_brew_stored(self, brew: dict[str, Any]) -> None:
+        """A brew was stored: give its journal entry (learned just before,
+        by start) the brew id."""
+        if self.journal.set_brew_id(brew["start"], brew["id"]):
+            self._dirty = True
+            self._store.async_delay_save(self._data_to_save, 1)
+
+    def learning_pending_for(self, start: str) -> bool:
+        """The cut of the brew starting at ``start`` (ISO) is not concluded
+        yet (its sample may still be learned)."""
+        cut = self._cut
+        return cut is not None and _iso(cut.start) == start
+
+    @callback
+    def async_learn(
+        self,
+        flow: float,
+        overshoot: float,
+        brew_id: str | None = None,
+        start: str | None = None,
+    ) -> bool:
         """Learn one sample from outside the live cut (past brew); persisted.
 
         Same acceptance as a live sample (overshoot and flow within the
-        plausible range); False if it was rejected.
+        plausible range); False if it was rejected (nothing changes). A brew
+        still in the journal has its sample replaced in place and the model
+        is replayed (not counted twice); otherwise the sample is learned
+        incrementally and journalled. Exception: a brew whose sample is no
+        longer in the journal (folded into its base after 50 newer samples,
+        or learned before the journal existed) is counted again.
         """
-        accepted = self.model.update(flow, overshoot)
-        if accepted:
-            self._async_changed()
-        return accepted
+        if not (
+            math.isfinite(flow)
+            and math.isfinite(overshoot)
+            and StopModel.plausible(overshoot, flow)
+        ):
+            return False
+        index = self.journal.index_of(brew_id, start)
+        if index is None:
+            if not self.model.update(flow, overshoot):
+                return False
+            self._journal_add(flow, overshoot, start, brew_id)
+        else:
+            self.journal.remove(brew_id, start)
+            self.journal.entries.insert(
+                index,
+                LearningJournal.entry(
+                    flow, overshoot, brew_id, start, dt_util.utcnow().isoformat()
+                ),
+            )
+            self.model = self.journal.replay()
+        self._async_changed()
+        return True
+
+    @callback
+    def async_forget_brew(self, brew_id: str, start: str | None) -> bool:
+        """Take a (deleted) brew's samples out of the learning: drop its
+        journal entries and replay the model. False (model untouched) if
+        the brew is not in the journal."""
+        if not self.journal.remove(brew_id, start):
+            return False
+        self.model = self.journal.replay()
+        self._async_changed()
+        return True
 
     @callback
     def async_reset(self) -> None:
-        """Forget the learned model (the last result stays visible)."""
+        """Forget the learned model and its journal (the last result stays
+        visible)."""
+        had = len(self.journal) > 0
         self.model.reset()
+        self.journal = LearningJournal()
         self._async_changed()
+        if had:
+            self._learned_changed()
 
     # ------------------------------------------------------- persistence
 
     async def async_load(self) -> None:
         """Load the learned model, the targets and the active bean."""
         data = await self._store.async_load() or {}
-        if "model" in data:
-            self.model = StopModel.from_dict(data.get("model"))
+        model = StopModel.parse(data.get("model"))
+        journal = LearningJournal.parse(data.get("journal"))
+        if journal is None:
+            # No (valid) journal, e.g. learned before 0.5.1: it starts
+            # empty on the stored model.
+            self.model = model if model is not None else StopModel()
+            self.journal = LearningJournal(self.model)
+        else:
+            if model is None:
+                # Model missing or damaged: rebuilt from the journal.
+                _LOGGER.warning(
+                    "%s: stored stop model unreadable, rebuilt from its "
+                    "learning journal (%s samples)",
+                    self.coordinator.address,
+                    len(journal),
+                )
+                model = journal.replay()
+            self.model = model
+            self.journal = journal
+        latency = data.get("switch_latency")
+        if isinstance(latency, Mapping):
+            self.latencies = SwitchLatencies.from_dict(dict(latency))
+            last = latency.get("last")
+            self.last_switch_latency = (
+                float(last) if isinstance(last, (int, float)) else None
+            )
         last = data.get("last")
         self.last = last if isinstance(last, dict) else None
         settings = data.get("settings")
@@ -848,8 +1258,13 @@ class AutoStop:
         self._dirty = False
         return {
             "model": self.model.to_dict(),
+            "journal": self.journal.to_dict(),
             "last": self.last,
             "settings": self.settings(),
+            "switch_latency": {
+                **self.latencies.to_dict(),
+                "last": self.last_switch_latency,
+            },
         }
 
     async def async_flush(self) -> None:

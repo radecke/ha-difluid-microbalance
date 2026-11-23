@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import timedelta
+import json
+from pathlib import Path
 import statistics
 from typing import Any
 from unittest.mock import patch
@@ -12,7 +15,7 @@ import pytest
 
 pytest.importorskip("pytest_homeassistant_custom_component")
 
-from homeassistant.core import HomeAssistant  # noqa: E402
+from homeassistant.core import HomeAssistant, ServiceCall  # noqa: E402
 from homeassistant.exceptions import ServiceValidationError  # noqa: E402
 from homeassistant.helpers.dispatcher import async_dispatcher_connect  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
@@ -25,6 +28,7 @@ from pytest_homeassistant_custom_component.common import (  # noqa: E402
 
 from conftest import Clock  # noqa: E402
 
+from custom_components.difluid_scale import autostop as autostop_mod  # noqa: E402
 from custom_components.difluid_scale import coordinator as coord_mod  # noqa: E402
 from custom_components.difluid_scale.const import (  # noqa: E402
     CARD_URL,
@@ -50,7 +54,11 @@ from custom_components.difluid_scale.protocol import (  # noqa: E402
     build_frame,
 )
 
-VERSION = "0.5.0"
+# The card resource carries the manifest version (?v=...).
+VERSION = json.loads(
+    (Path(__file__).resolve().parents[1] / "custom_components" / "difluid_scale"
+     / "manifest.json").read_text()
+)["version"]
 BREW_ENTITIES = (
     "sensor.microbalance_last_dose",
     "sensor.microbalance_last_yield",
@@ -1058,15 +1066,96 @@ PLUG = "switch.coffee_machine"
 PLUG_ATTRS = {"friendly_name": "Coffee machine"}
 TARGET = "number.microbalance_target_yield"
 STOP_SENSORS = (
-    "sensor.microbalance_stop_latency",
+    "sensor.microbalance_learned_stop_latency",
     "sensor.microbalance_stop_drip",
     "sensor.microbalance_stop_learning_samples",
     "sensor.microbalance_stop_deviation",
 )
 
 
+# Nominal latency of the fake plug (the measured median of the real one,
+# 2026-11-23: 68 ms; 0.07 s = the default nominal latency, so a shot at it
+# learns uncorrected).
+PLUG_LATENCY = 0.07
+
+
+class PlugCalls(list):
+    """The plug's turn_off calls; ``reports`` records for every ``off``
+    report whether the service call had returned by then."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reports: list[bool] = []
+
+
+def _call_returned(hass: HomeAssistant) -> bool:
+    """The auto-stop's running measurement has seen its call return (or
+    there is none)."""
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        coord = getattr(entry, "runtime_data", None)
+        probe = coord.autostop._probe if coord is not None else None  # noqa: SLF001
+        if probe is not None and probe._call_ok is None:  # noqa: SLF001
+            return False
+    return True
+
+
+def mock_plug(
+    hass: HomeAssistant,
+    *,
+    latency: float | None = PLUG_LATENCY,
+    report: str = "after",
+) -> PlugCalls:
+    """``switch.turn_off`` of a non-optimistic smart plug: its state becomes
+    ``off`` only when the plug reports, ``latency`` s (switch clock) after
+    the measurement start.
+
+    ``report``: "after" (default, like Zigbee2MQTT: the MQTT publish returns
+    at once, the report arrives after the call returned, a few loop turns
+    later, before the shot goes on); "during" = before the call returns;
+    "never" = no report (latency ignored; for a late report use
+    ``plug_reports_off``)."""
+    calls = PlugCalls()
+
+    def _report(entity_id: str) -> None:
+        calls.reports.append(_call_returned(hass))
+        plug_reports_off(hass, entity_id, latency)
+
+    async def _later(entity_id: str) -> None:
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if _call_returned(hass):
+                break
+        _report(entity_id)
+
+    async def _turn_off(call: ServiceCall) -> None:
+        calls.append(call)
+        if latency is None or report == "never":
+            return
+        if report == "during":
+            _report(call.data["entity_id"])
+        else:
+            hass.async_create_task(_later(call.data["entity_id"]))
+
+    hass.services.async_register("switch", "turn_off", _turn_off)
+    return calls
+
+
+def plug_reports_off(hass: HomeAssistant, entity_id: str, latency: float) -> None:
+    """The plug reports ``off`` ``latency`` s after the measurement start."""
+    clock = autostop_mod.time
+    clock.t += latency
+    state = hass.states.get(entity_id)
+    hass.states.async_set(entity_id, "off", state.attributes if state else PLUG_ATTRS)
+
+
 async def _setup_autostop(
-    hass: HomeAssistant, entry: MockConfigEntry, switch: str | None, target: float
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    switch: str | None,
+    target: float,
+    *,
+    latency: float | None = PLUG_LATENCY,
+    report: str = "after",
 ) -> list:
     options = dict(OPTIONS)
     if switch is not None:
@@ -1075,7 +1164,7 @@ async def _setup_autostop(
         hass.states.async_set(switch, "on", PLUG_ATTRS)
     hass.config_entries.async_update_entry(entry, options=options)
     await _setup(hass, entry)
-    calls = async_mock_service(hass, "switch", "turn_off")
+    calls = mock_plug(hass, latency=latency, report=report)
     await hass.services.async_call(
         "number", "set_value", {"entity_id": TARGET, "value": target}, blocking=True
     )
@@ -1117,6 +1206,11 @@ async def _auto_shot(
             scale.status(DeviceState.TIMING)
 
     scale.client.on_status = _on_status
+    # The machine is switched on again for every shot (the plug reported
+    # off after the previous auto-stop).
+    switch = coord.autostop.switch_entity
+    if switch and (st := hass.states.get(switch)) and st.state == "off":
+        hass.states.async_set(switch, "on", st.attributes)
     scale.status(DeviceState.TIMING)
     scale.timer_start = clock.t
     w = start_weight
@@ -1177,7 +1271,7 @@ async def test_autostop_cuts_once_learns_and_persists(
     calls = await _setup_autostop(hass, entry, PLUG, 38.0)
     coord = entry.runtime_data
     assert _state(hass, TARGET) == "38.0"
-    assert _state(hass, "sensor.microbalance_stop_latency") == "1.0"
+    assert _state(hass, "sensor.microbalance_learned_stop_latency") == "1.0"
     assert _state(hass, "sensor.microbalance_stop_drip") == "0.3"
     assert _state(hass, "sensor.microbalance_stop_learning_samples") == "0"
     assert _state(hass, "sensor.microbalance_stop_deviation") == "unknown"
@@ -1211,7 +1305,7 @@ async def test_autostop_cuts_once_learns_and_persists(
     assert coord.autostop.model.count == 1
     assert _state(hass, "sensor.microbalance_stop_learning_samples") == "1"
     # Prior phase: tau learned, c stays at its prior.
-    assert float(_state(hass, "sensor.microbalance_stop_latency")) != 1.0
+    assert float(_state(hass, "sensor.microbalance_learned_stop_latency")) != 1.0
     assert _state(hass, "sensor.microbalance_stop_drip") == "0.3"
     attrs = hass.states.get("sensor.microbalance_stop_deviation").attributes
     assert attrs["accepted"] is True and attrs["cut_weight"] == last["cut_weight"]
@@ -1242,7 +1336,7 @@ async def test_autostop_cuts_once_learns_and_persists(
     )
     assert coord.autostop.model.count == 0
     assert _state(hass, "sensor.microbalance_stop_learning_samples") == "0"
-    assert _state(hass, "sensor.microbalance_stop_latency") == "1.0"
+    assert _state(hass, "sensor.microbalance_learned_stop_latency") == "1.0"
 
     # Removing the entry deletes the learned model.
     assert await hass.config_entries.async_remove(entry.entry_id)
@@ -1529,17 +1623,24 @@ async def test_delete_brew_service(
         await hass.services.async_call(
             DOMAIN, "delete_brew", {"brew_id": "01NOPE"}, blocking=True
         )
-    # Deleting the newest: counted_dose (18.0, not the corrected 17.5) leaves
-    # the total; sensors follow the new newest brew.
-    await hass.services.async_call(
+    # Deleting the newest: the totals stay (total_increasing, since
+    # 0.5.1); sensors follow the new newest brew. Not in the learning
+    # journal: the model is untouched.
+    response = await hass.services.async_call(
         DOMAIN, "delete_brew",
         {"brew_id": "01OTHER", "entry_id": entry.entry_id}, blocking=True,
+        return_response=True,
     )
     await hass.async_block_till_done()
+    assert response == {
+        "brew_id": "01OTHER",
+        "removed_from_learning": False,
+        "model": {"tau": 1.0, "c": 0.3, "count": 0},
+    }
     assert [b["id"] for b in coord.brews.brews] == ["01REAL"]
-    assert coord.brews.brew_count == 4 and coord.brews.coffee_total == 72.0
-    assert _state(hass, "sensor.microbalance_brew_count") == "4"
-    assert _state(hass, "sensor.microbalance_coffee_ground_total") == "72.0"
+    assert coord.brews.brew_count == 5 and coord.brews.coffee_total == 90.0
+    assert _state(hass, "sensor.microbalance_brew_count") == "5"
+    assert _state(hass, "sensor.microbalance_coffee_ground_total") == "90.0"
     assert _state(hass, "sensor.microbalance_last_yield") == "38.6"
     assert signals and events == []
     # Persisted (flushed on unload).
@@ -1547,7 +1648,7 @@ async def test_delete_brew_service(
     await hass.async_block_till_done()
     data = hass_storage[key]["data"]
     assert [b["id"] for b in data["brews"]] == ["01REAL"]
-    assert data["brew_count"] == 4 and data["coffee_total"] == 72.0
+    assert data["brew_count"] == 5 and data["coffee_total"] == 90.0
 
 
 async def test_learn_stop_from_brew_service(

@@ -41,7 +41,7 @@ def test_card_flow_and_ready() -> None:
         text=True,
         timeout=60,
     )
-    assert "11 scenarios OK" in out.stdout
+    assert "13 scenarios OK" in out.stdout
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")

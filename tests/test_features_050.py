@@ -594,9 +594,13 @@ async def test_repair_issue_for_missing_or_unavailable_stop_switch(
     assert _issue(hass, entry) is not None
     types = [s.attributes["event_type"] for s in events]
     assert types[0] == "switch_failed", types
-    # The attempt went on as usual (timer stopped once settled, concluded).
+    # The attempt went on as usual (timer stopped once settled, concluded),
+    # but is not learned (0.5.1): the switch was not on at the cut, so its
+    # latency (and the overshoot's switch share) is unknown.
     assert scale.client.written.count(CMD_TIMER_STOP) == 1
-    assert types[-1] == "learned" and coord.autostop.model.count == 1
+    assert types[-1] == "switch_latency_unknown", types
+    assert coord.autostop.model.count == 0
+    assert events[-1].attributes["switch_latency"] is None
     # Option change: re-checked; emptied option clears it.
     result = await _options_step(hass, entry, "detection")
     await hass.config_entries.options.async_configure(result["flow_id"], dict(OPTIONS))
@@ -741,11 +745,13 @@ async def test_autostop_event_switch_failed_when_service_raises(
     events = _events(hass, AUTO_STOP_EVENT)
     coord = entry.runtime_data
     scale = Scale(coord, clock)
-    # Nothing switched off: the pump runs on (stopped by hand 3 s later),
-    # the cup overshoots by more than a plausible sample.
+    # Nothing switched off: the pump runs on (stopped by hand 3 s later).
+    # A failed call has no switch latency: not learned (0.5.1; before, the
+    # overshoot made it an outlier).
     await _auto_shot(hass, scale, latency=3.0, seconds=45)
     types = [s.attributes["event_type"] for s in events]
-    assert types == ["switch_failed", "outlier"], types
+    assert types == ["switch_failed", "switch_latency_unknown"], types
+    assert coord.autostop.model.count == 0
     # The switch exists and is available: a failing call is no repair issue.
     assert _issue(hass, entry) is None
 

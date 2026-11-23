@@ -73,13 +73,32 @@
         "name": "Kaffee gemahlen gesamt"
       },
       "stop_latency": {
-        "name": "Stopp-Latenz"
+        "name": "Gelernte Stopp-Latenz"
+      },
+      "stop_switch_latency": {
+        "name": "Letzte Schaltlatenz",
+        "state_attributes": {
+          "nominal_switch_latency": {
+            "name": "Nominale Schaltlatenz"
+          },
+          "measurements": {
+            "name": "Messungen"
+          }
+        }
       },
       "stop_drip": {
         "name": "Stopp-Nachtropfen"
       },
       "stop_samples": {
-        "name": "Stopp-Lernproben"
+        "name": "Stopp-Lernproben",
+        "state_attributes": {
+          "journal_samples": {
+            "name": "Proben im Lernjournal"
+          },
+          "journal_base_samples": {
+            "name": "Ältere Proben"
+          }
+        }
       },
       "stop_deviation": {
         "name": "Stopp-Abweichung",
@@ -115,7 +134,8 @@
               "not_settled": "Gewicht nicht zur Ruhe gekommen",
               "brew_discarded": "Bezug verworfen",
               "brew_truncated": "Bezug abgebrochen",
-              "cup_lifted": "Tasse vor dem Nachtropfen abgenommen"
+              "cup_lifted": "Tasse vor dem Nachtropfen abgenommen",
+              "switch_latency_unknown": "Schaltlatenz des Stopp-Schalters unbekannt"
             }
           },
           "target_source": {
@@ -130,6 +150,15 @@
           },
           "bean": {
             "name": "Bohne"
+          },
+          "switch_latency": {
+            "name": "Schaltlatenz"
+          },
+          "nominal_switch_latency": {
+            "name": "Nominale Schaltlatenz"
+          },
+          "adjusted_overshoot": {
+            "name": "Korrigierter Nachlauf"
           }
         }
       }
@@ -187,7 +216,8 @@
               "not_settled": "Gewicht nicht zur Ruhe gekommen",
               "brew_discarded": "Bezug verworfen",
               "brew_truncated": "Bezug abgebrochen",
-              "cup_lifted": "Tasse vor dem Nachtropfen abgenommen"
+              "cup_lifted": "Tasse vor dem Nachtropfen abgenommen",
+              "switch_latency_unknown": "Schaltlatenz des Stopp-Schalters unbekannt"
             }
           },
           "target": {
@@ -220,6 +250,9 @@
           },
           "bean": {
             "name": "Bohne"
+          },
+          "switch_latency": {
+            "name": "Schaltlatenz"
           }
         }
       }
@@ -281,6 +314,9 @@
     },
     "unknown_brew": {
       "message": "Kein gespeicherter Bezug mit der ID {brew_id}."
+    },
+    "brew_busy": {
+      "message": "Dieser Bezug läuft noch oder sein Auto-Stopp-Ergebnis steht noch aus; nach dem Ende erneut versuchen."
     },
     "cut_outside_profile": {
       "message": "Das Profil des Bezugs hat keinen Punkt bei oder vor {cut_offset} s (oder der Bezug hat kein Gewicht)."
@@ -420,7 +456,7 @@
   "services": {
     "delete_brew": {
       "name": "Bezug löschen",
-      "description": "Entfernt einen gespeicherten Bezug aus dem Verlauf; Bezugsanzahl und Kaffeemenge gesamt werden entsprechend verringert.",
+      "description": "Entfernt einen gespeicherten Bezug aus dem Verlauf und nimmt seine Probe aus dem Auto-Stopp-Lernen (das Modell wird aus den übrigen Proben neu berechnet). Bezugsanzahl und Kaffeemenge gesamt zählen alle je gemachten Bezüge und werden nicht verringert. Gibt die Bezugs-ID zurück, ob er im Lernen war, und das Modell danach.",
       "fields": {
         "entry_id": {
           "name": "Waage",
@@ -438,7 +474,7 @@
     },
     "learn_stop_from_brew": {
       "name": "Stopp aus Bezug lernen",
-      "description": "Lernt das Auto-Stopp-Modell aus einem früheren Bezug: Gewicht und aus dem Gewicht abgeleiteter Durchfluss zum Abschaltzeitpunkt aus dem gespeicherten Profil, Nachlauf = gespeichertes Gewicht − Gewicht beim Abschalten. Gleiche Annahmeprüfung wie eine Live-Probe. Gibt die berechnete Probe zurück.",
+      "description": "Lernt das Auto-Stopp-Modell aus einem früheren Bezug: Gewicht und aus dem Gewicht abgeleiteter Durchfluss zum Abschaltzeitpunkt aus dem gespeicherten Profil, Nachlauf = gespeichertes Gewicht − Gewicht beim Abschalten. Gleiche Annahmeprüfung wie ein Live-Lernwert. Gibt den berechneten Lernwert zurück. Ist die Probe des Bezugs noch im Lernjournal (die letzten 50 Proben), wird sie ersetzt statt doppelt gezählt.",
       "fields": {
         "entry_id": {
           "name": "Waage",
@@ -459,6 +495,10 @@
         "target": {
           "name": "Zielgewicht",
           "description": "Optional: Ziel dieses Bezugs; nur für die Abweichung in der Antwort."
+        },
+        "switch_latency": {
+          "name": "Schaltlatenz",
+          "description": "Optional: Sekunden vom turn_off-Aufruf bis der Stopp-Schalter bei diesem Abschalten „aus“ meldete (z. B. aus dem Recorder). Hat Vorrang vor der mit dem Bezug gespeicherten Latenz. Mit Latenz wird der Lernwert wie live auf die nominale Schaltlatenz korrigiert. Ein Bezug, dessen Messung ohne Wert endete, wird ohne diese Angabe nicht gelernt; Bezüge vor 0.5.1 (nie gemessen) werden unkorrigiert gelernt."
         }
       }
     },
@@ -515,6 +555,10 @@
     "stop_switch_unavailable": {
       "title": "Stopp-Schalter von {name} ist nicht verfügbar",
       "description": "Der Auto-Stopp von {name} nutzt den Schalter `{entity_id}`, aber den gibt es nicht oder er ist nicht verfügbar, deshalb werden Bezüge nicht beim Ziel gestoppt. Mach den Schalter wieder verfügbar oder wähle einen anderen (oder keinen) unter Einstellungen > Geräte & Dienste > DiFluid Microbalance > Konfigurieren > Bezugserkennung und Stopp-Schalter. Diese Meldung verschwindet von selbst, sobald der Schalter wieder da ist."
+    },
+    "stop_switch_latency_unknown": {
+      "title": "Stopp-Schalter von {name} meldet „aus“ nicht rechtzeitig",
+      "description": "Der Auto-Stopp von {name} schaltet `{entity_id}` aus, aber bei den letzten {count} Auto-Stopps in Folge hat der Schalter nicht innerhalb von 5 Sekunden „aus“ gemeldet (oder der Aufruf schlug fehl). Ohne diese Meldung lässt sich die Verzögerung des Schalters nicht vom Nachtropfen trennen, deshalb wurden diese Bezüge nicht gelernt und der Auto-Stopp passt sich nicht mehr an. Prüfe die Verbindung des Schalters (z. B. Zigbee-Empfang, MQTT-Meldungen) oder wähle einen anderen Schalter unter Einstellungen > Geräte & Dienste > DiFluid Microbalance > Konfigurieren > Bezugserkennung und Stopp-Schalter. Diese Meldung verschwindet von selbst beim nächsten Auto-Stopp mit gemessener Latenz."
     }
   }
 }

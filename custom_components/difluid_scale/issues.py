@@ -1,4 +1,5 @@
-"""Repair issue: the configured stop switch is missing or unavailable.
+"""Repair issues: the configured stop switch is missing or unavailable;
+or it did not report ``off`` in time at several auto-stop cuts in a row.
 
 (Not ``repairs.py``: that name is the platform for fixable issues.)
 
@@ -17,7 +18,13 @@ from homeassistant.const import ATTR_RESTORED, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import issue_registry as ir
 
-from .const import DOMAIN, ISSUE_STOP_SWITCH, MODEL
+from .const import (
+    DOMAIN,
+    ISSUE_STOP_SWITCH,
+    ISSUE_SWITCH_LATENCY,
+    MODEL,
+    SWITCH_LATENCY_ISSUE_STREAK,
+)
 
 # When a switch counts as a problem:
 # - MODE_MISSING (setup, options change): only when it does not exist. At
@@ -100,3 +107,41 @@ def async_update_stop_switch_issue(
 def async_clear_stop_switch_issue(hass: HomeAssistant, entry_id: str) -> None:
     """Remove the issue (entry unloaded or removed)."""
     ir.async_delete_issue(hass, DOMAIN, stop_switch_issue_id(entry_id))
+
+
+def switch_latency_issue_id(entry_id: str) -> str:
+    """Latency issue id per config entry."""
+    return f"{ISSUE_SWITCH_LATENCY}_{entry_id}"
+
+
+@callback
+def async_update_switch_latency_issue(
+    hass: HomeAssistant, entry: ConfigEntry, entity_id: str | None, streak: int
+) -> None:
+    """Create the issue once ``streak`` auto-stop cuts in a row ended without
+    an ``off`` report in time (nothing learned from them); clear it on the
+    next measured latency (streak 0), without a switch or another switch."""
+    issue_id = switch_latency_issue_id(entry.entry_id)
+    if entity_id is None or streak < SWITCH_LATENCY_ISSUE_STREAK:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        is_persistent=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_SWITCH_LATENCY,
+        translation_placeholders={
+            "entity_id": entity_id,
+            "name": entry_name(entry),
+            "count": str(streak),
+        },
+    )
+
+
+@callback
+def async_clear_switch_latency_issue(hass: HomeAssistant, entry_id: str) -> None:
+    """Remove the latency issue (entry unloaded or removed)."""
+    ir.async_delete_issue(hass, DOMAIN, switch_latency_issue_id(entry_id))

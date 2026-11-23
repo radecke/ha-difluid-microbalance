@@ -13,7 +13,12 @@ from .brews import BrewHistory, brew_config_from_options
 from .const import DOMAIN, STOP_STORAGE_KEY, STOP_STORAGE_VERSION
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
 from .frontend import async_register_card
-from .issues import MODE_MISSING, MODE_RUNTIME, async_clear_stop_switch_issue
+from .issues import (
+    MODE_MISSING,
+    MODE_RUNTIME,
+    async_clear_stop_switch_issue,
+    async_clear_switch_latency_issue,
+)
 from .services import async_register_services
 from .websocket import async_register_websocket
 
@@ -91,6 +96,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: DifluidConfigEntry) -> 
 async def async_remove_entry(hass: HomeAssistant, entry: DifluidConfigEntry) -> None:
     """Delete stored brews and the learned stop model when the entry is removed."""
     async_clear_stop_switch_issue(hass, entry.entry_id)
+    async_clear_switch_latency_issue(hass, entry.entry_id)
     await BrewHistory(hass, entry.entry_id, lambda: None).async_remove()
     await Store(
         hass, STOP_STORAGE_VERSION, STOP_STORAGE_KEY.format(entry.entry_id)

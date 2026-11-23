@@ -63,6 +63,19 @@ class Clock:
         return self.t
 
 
+class SwitchClock:
+    """Replaces ``time`` in the auto-stop (stop switch latency measurement).
+
+    A fake plug advances ``t`` by its latency before it reports ``off``.
+    """
+
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+
 if HAS_HA:
     from collections.abc import Generator
     from unittest.mock import patch
@@ -78,6 +91,15 @@ if HAS_HA:
     def auto_enable_custom_integrations(enable_custom_integrations):
         """Load custom_components/ in every HA test."""
         yield
+
+    from custom_components.difluid_scale import autostop as autostop_mod
+
+    @pytest.fixture(autouse=True)
+    def switch_clock() -> Generator[SwitchClock]:
+        """Controlled monotonic clock for the switch latency measurement."""
+        c = SwitchClock()
+        with patch.object(autostop_mod, "time", c):
+            yield c
 
     @pytest.fixture
     def clock() -> Generator[Clock]:

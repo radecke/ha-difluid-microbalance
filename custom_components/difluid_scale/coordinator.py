@@ -754,8 +754,15 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 bean=self.autostop.brew_bean(result.start),
                 target=self.autostop.brew_target(result.start, result.dose),
                 cut_at=self.autostop.cut_offset(result.start),
+                switch_latency=self.autostop.switch_latency_for(result.start),
+                switch_latency_unknown=self.autostop.switch_latency_unknown_for(
+                    result.start
+                ),
             )
-            self._end_live(end_message(brew=brew_summary(brew)))
+            self.autostop.async_brew_stored(brew)
+            summary = brew_summary(brew)
+            summary["learned"] = self.autostop.learned(brew)
+            self._end_live(end_message(brew=summary))
         elif tracker.last_discard_reason:
             _LOGGER.debug(
                 "%s: run discarded (%s)", self.address, tracker.last_discard_reason

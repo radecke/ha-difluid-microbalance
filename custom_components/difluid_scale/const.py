@@ -48,6 +48,12 @@ CONF_DOSE_LOOKBACK: Final = "dose_lookback_minutes"
 # Adaptive stop: switch turned off when the target yield is reached (none =
 # feature off). Not a brew threshold, so not in DEFAULT_OPTIONS.
 CONF_STOP_SWITCH: Final = "stop_switch"
+# Pump throttle (0.6.0): number entity (0-100 %) that sets the pump power
+# (e.g. an ESPHome PSM dimmer); none = the throttle can only observe.
+CONF_PUMP_POWER: Final = "pump_power"
+# Removed in 0.7.0b2 (the pump profiles' tare rule, replaced by "Prepare
+# brew"): dropped from stored options by the entry migration 1.1 -> 1.2.
+LEGACY_CONF_TARE_WINDOW: Final = "tare_window"
 # Bean profiles (options flow): list of {id, name, ratio, note}.
 CONF_BEANS: Final = "beans"
 BEAN_NONE: Final = "none"  # select option: no active bean
@@ -69,7 +75,14 @@ ISSUE_STOP_SWITCH: Final = "stop_switch_unavailable"
 # The stop switch did not report ``off`` in time at this many auto-stop cuts
 # in a row: their latency is unknown, so nothing is learned (repair issue).
 ISSUE_SWITCH_LATENCY: Final = "stop_switch_latency_unknown"
+# The auto-stop could not turn the stop switch off within its retry window.
+ISSUE_CUT_FAILED: Final = "auto_stop_cut_failed"
 SWITCH_LATENCY_ISSUE_STREAK: Final = 3
+# Repair issues (0.7.0): the active pump profile has a 0 % phase (a bloom)
+# but the scale's own "auto stop timing" is on (it may end the brew in the
+# bloom) / the pump entity's min is above 0 (it cannot be off).
+ISSUE_PROFILE_BLOOM_SCALE: Final = "profile_bloom_scale_auto_stop"
+ISSUE_PROFILE_BLOOM_PUMP: Final = "profile_bloom_pump_min"
 SIGNAL_BREWS_UPDATED: Final = f"{DOMAIN}_brews_updated_{{}}"  # .format(entry_id)
 SIGNAL_LIVE: Final = f"{DOMAIN}_live_{{}}"  # .format(entry_id)
 
@@ -82,7 +95,9 @@ MAX_STORED_BREWS: Final = 20
 STOP_STORAGE_VERSION: Final = 1
 # 1.2 (0.5.0): ``settings`` (target ratio, target yield, active bean) kept by
 # the integration instead of only in the number entities' restore state.
-STOP_STORAGE_MINOR_VERSION: Final = 2
+# 1.3 (0.6.0): ``throttle`` (pump throttle settings, power model, its
+# learning journal, last result, last relay off).
+STOP_STORAGE_MINOR_VERSION: Final = 4
 STOP_STORAGE_KEY: Final = f"{DOMAIN}.stop_learning.{{}}"  # .format(entry_id)
 
 # Brew tracker housekeeping while a brew is active (stall check, tail end,

@@ -1,5 +1,6 @@
 """Services: delete a stored brew, learn the auto-stop from a past brew,
-add and delete bean profiles (e.g. from a dashboard)."""
+add and delete bean profiles (e.g. from a dashboard), import, delete and
+export pump profiles (0.7.0)."""
 
 from __future__ import annotations
 
@@ -23,17 +24,24 @@ from .autostop import REASON_NO_SWITCH_LATENCY
 from .beans import (
     BEAN_ID,
     BEAN_NAME,
+    BEAN_PROFILE,
     BEAN_RATIO,
+    BEAN_RATIOS,
+    BEAN_SHOT_TIME,
     RATIO_MAX,
     RATIO_MIN,
+    SHOT_TIME_MAX,
+    SHOT_TIME_MIN,
     find_bean,
     NAME_MAX,
     find_bean_by_name,
     make_bean,
+    without_profile,
     name_error,
 )
 from .const import CONF_BEANS, DOMAIN
 from .coordinator import DifluidConfigEntry
+from .profiles import LibraryError, ProfileError, builtin, parse_profile
 from .stop_model import (
     SWITCH_LATENCY_TIMEOUT,
     adjusted_overshoot,
@@ -46,6 +54,9 @@ SERVICE_DELETE_BREW = "delete_brew"
 SERVICE_LEARN_STOP = "learn_stop_from_brew"
 SERVICE_ADD_BEAN = "add_bean"
 SERVICE_DELETE_BEAN = "delete_bean"
+SERVICE_IMPORT_PROFILE = "import_profile"
+SERVICE_DELETE_PROFILE = "delete_profile"
+SERVICE_EXPORT_PROFILE = "export_profile"
 
 ATTR_ENTRY_ID = "entry_id"
 ATTR_DEVICE_ID = "device_id"
@@ -57,9 +68,13 @@ ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_NAME = "name"
 ATTR_RATIO = "ratio"
 ATTR_NOTE = "note"
+ATTR_SHOT_TIME = "shot_time"
 ATTR_ACTIVATE = "activate"
 ATTR_BEAN_ID = "bean_id"
 ATTR_ACTIVE = "active"
+ATTR_PROFILE = "profile"
+ATTR_OVERWRITE = "overwrite"
+ATTR_LABEL = "label"
 
 # Same targeting as the websocket API: entry_id or device_id, or neither
 # when exactly one scale is set up.
@@ -91,7 +106,36 @@ ADD_BEAN_SCHEMA = vol.Schema(
         # Range checked in the handler (translated error).
         vol.Optional(ATTR_RATIO): vol.Coerce(float),
         vol.Optional(ATTR_NOTE): cv.string,
+        # Pump throttle: target shot time for this bean (s).
+        vol.Optional(ATTR_SHOT_TIME): vol.All(
+            vol.Coerce(float), vol.Range(min=SHOT_TIME_MIN, max=SHOT_TIME_MAX)
+        ),
+        # Default pump profile of this bean (label, 0.7.0).
+        vol.Optional(ATTR_PROFILE): vol.Any(None, cv.string),
         vol.Optional(ATTR_ACTIVATE, default=True): cv.boolean,
+    }
+)
+# Pump profiles (0.7.0). The profile: GaggiMate-subset JSON as an object or
+# as its text (validated in the handler: translated error with the reason).
+IMPORT_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Required(ATTR_PROFILE): vol.Any(dict, cv.string),
+        vol.Optional(ATTR_OVERWRITE, default=False): cv.boolean,
+        vol.Optional(ATTR_ACTIVATE, default=False): cv.boolean,
+    }
+)
+DELETE_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Required(ATTR_LABEL): cv.string,
+    }
+)
+EXPORT_PROFILE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        # Missing: the active profile.
+        vol.Optional(ATTR_LABEL): vol.Any(None, cv.string),
     }
 )
 # Exactly one of name, bean_id, active: true (checked in the handler, so the
@@ -207,6 +251,19 @@ def async_register_services(hass: HomeAssistant) -> None:
             },
         }
 
+    def _throttled(brew: dict[str, Any]) -> bool:
+        """The stored brew's pump was set below full power (throttle or a
+        pump profile; its journal entry is marked ``throttled``)."""
+        record = brew.get("throttle")
+        if not isinstance(record, dict) or record.get("applied") is not True:
+            return False
+        power = record.get("power") or []
+        return any(
+            isinstance(p, list) and len(p) > 1 and isinstance(p[1], (int, float))
+            and p[1] < 100
+            for p in power
+        )
+
     @callback
     def _learn_stop(call: ServiceCall) -> ServiceResponse:
         entry = _entry(hass, call)
@@ -253,7 +310,13 @@ def async_register_services(hass: HomeAssistant) -> None:
         accepted = (
             not unknown
             and clean
-            and autostop.async_learn(flow, learned, brew_id, brew.get("start"))
+            and autostop.async_learn(
+                flow,
+                learned,
+                brew_id,
+                brew.get("start"),
+                throttled=_throttled(brew),
+            )
         )
         target = call.data.get(ATTR_TARGET)
         model = autostop.model
@@ -314,7 +377,20 @@ def async_register_services(hass: HomeAssistant) -> None:
                 min=f"{RATIO_MIN:g}",
                 max=f"{RATIO_MAX:g}",
             )
-        bean = make_bean(ulid_now(), name, ratio, call.data.get(ATTR_NOTE))
+        profile = (call.data.get(ATTR_PROFILE) or "").strip() or None
+        if profile is not None:
+            found = autostop.throttle.profiles.library.get(profile)
+            if found is None:
+                raise _bean_error("profile_unknown", label=profile)
+            profile = found.label
+        bean = make_bean(
+            ulid_now(),
+            name,
+            ratio,
+            call.data.get(ATTR_NOTE),
+            call.data.get(ATTR_SHOT_TIME),
+            profile,
+        )
         hass.config_entries.async_update_entry(
             entry, options={**entry.options, CONF_BEANS: [*beans, bean]}
         )
@@ -324,11 +400,76 @@ def async_register_services(hass: HomeAssistant) -> None:
             autostop.select_bean(bean[BEAN_ID])  # the ratio follows
         else:
             autostop.async_beans_changed()
-        return {
+        response = {
             "bean_id": bean[BEAN_ID],
             "name": bean[BEAN_NAME],
             "ratio": bean[BEAN_RATIO],
             "active": active,
+        }
+        if BEAN_SHOT_TIME in bean:
+            response["shot_time"] = bean[BEAN_SHOT_TIME]
+        if BEAN_PROFILE in bean:
+            response["profile"] = bean[BEAN_PROFILE]
+        response["ratios"] = dict(bean[BEAN_RATIOS])  # per pump profile (0.7.0b6)
+        return response
+
+    @callback
+    def _import_profile(call: ServiceCall) -> ServiceResponse:
+        """Import a GaggiMate-subset profile (validated) as a user profile."""
+        entry = _bean_entry(hass, call)
+        throttle = entry.runtime_data.autostop.throttle
+        try:
+            profile = parse_profile(call.data[ATTR_PROFILE])
+        except ProfileError as err:
+            raise _bean_error("profile_invalid", error=str(err)) from err
+        try:
+            replaced = throttle.profiles.library.add(
+                profile, overwrite=call.data[ATTR_OVERWRITE]
+            )
+        except LibraryError as err:
+            raise _bean_error(err.key, label=err.label) from err
+        if call.data[ATTR_ACTIVATE]:
+            throttle.select_profile(profile.label)
+        else:
+            throttle.profiles_changed()
+        return {
+            "label": profile.label,
+            "replaced": replaced,
+            "active": throttle.profiles.active.label,
+            "phases": len(profile.phases),
+        }
+
+    @callback
+    def _delete_profile(call: ServiceCall) -> ServiceResponse:
+        """Delete a user profile; the active one falls back to Standard."""
+        entry = _bean_entry(hass, call)
+        throttle = entry.runtime_data.autostop.throttle
+        try:
+            profile = throttle.profiles.library.remove(call.data[ATTR_LABEL])
+        except LibraryError as err:
+            raise _bean_error(err.key, label=err.label) from err
+        # Beans that named it lose their profile (else the options flow
+        # could not show them); their ratio follows their Standard ratio.
+        new_options = without_profile(entry.options, profile.label)
+        if new_options is not None:
+            hass.config_entries.async_update_entry(entry, options=new_options)
+        throttle.profiles_changed()
+        return {"label": profile.label, "active": throttle.profiles.active.label}
+
+    @callback
+    def _export_profile(call: ServiceCall) -> ServiceResponse:
+        """A profile's JSON (the active one without a label)."""
+        entry = _bean_entry(hass, call)
+        library = entry.runtime_data.autostop.throttle.profiles.library
+        label = (call.data.get(ATTR_LABEL) or "").strip()
+        profile = library.get(label) if label else library.active
+        if profile is None:
+            raise _bean_error("profile_unknown", label=label)
+        return {
+            "label": profile.label,
+            "builtin": builtin(profile.label) is not None,
+            "active": profile.label == library.active.label,
+            "profile": profile.to_json(),
         }
 
     @callback
@@ -387,6 +528,27 @@ def async_register_services(hass: HomeAssistant) -> None:
         _delete_bean,
         schema=DELETE_BEAN_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_IMPORT_PROFILE,
+        _import_profile,
+        schema=IMPORT_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DELETE_PROFILE,
+        _delete_profile,
+        schema=DELETE_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_EXPORT_PROFILE,
+        _export_profile,
+        schema=EXPORT_PROFILE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,

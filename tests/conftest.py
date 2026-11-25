@@ -62,6 +62,11 @@ class Clock:
     def time(self) -> float:
         return self.t
 
+    def monotonic(self) -> float:
+        # The brew clock (coordinator._now) compares both: one test clock
+        # means no wall clock step.
+        return self.t
+
 
 class SwitchClock:
     """Replaces ``time`` in the auto-stop (stop switch latency measurement).

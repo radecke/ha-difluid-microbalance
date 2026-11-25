@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
-from .entity import DifluidEntity, DifluidStopEntity
+from .entity import DifluidEntity, DifluidStopEntity, DifluidThrottleEntity
 from .protocol import (
     CMD_TARE,
     CMD_TIMER_START,
@@ -36,23 +36,36 @@ async def _send_frame(coordinator: DifluidCoordinator, frame: bytes) -> None:
     await coordinator.async_send(frame)
 
 
+def _timer_state_error(state: int | None) -> HomeAssistantError:
+    return HomeAssistantError(
+        translation_domain=DOMAIN,
+        translation_key="timer_state",
+        translation_placeholders={"state": str(state)},
+    )
+
+
+async def _status(coordinator: DifluidCoordinator) -> int:
+    """The device state; no answer aborts (audit A5): the next click
+    could move a running timer on, so never click without knowing it."""
+    state = await coordinator.async_request_status()
+    if state is None:
+        raise _timer_state_error(None)
+    return state
+
+
 async def _click_until(
     coordinator: DifluidCoordinator, target: DeviceState
 ) -> None:
     """Click the DLink key until the device reports ``target``."""
-    state = await coordinator.async_request_status()
+    state = await _status(coordinator)
     for _ in range(_MAX_CLICKS):
         if state == target:
             return
         await coordinator.async_send(CMD_TIMER_START)
         await asyncio.sleep(0.3)
-        state = await coordinator.async_request_status()
+        state = await _status(coordinator)
     if state != target:
-        raise HomeAssistantError(
-            translation_domain=DOMAIN,
-            translation_key="timer_state",
-            translation_placeholders={"state": str(state)},
-        )
+        raise _timer_state_error(state)
 
 
 async def _timer_start(coordinator: DifluidCoordinator) -> None:
@@ -64,7 +77,7 @@ async def _timer_stop(coordinator: DifluidCoordinator) -> None:
 
 
 async def _timer_reset(coordinator: DifluidCoordinator) -> None:
-    state = await coordinator.async_request_status()
+    state = await _status(coordinator)
     if state == DeviceState.TIMING:
         await coordinator.async_send(CMD_TIMER_STOP)
         await asyncio.sleep(0.3)
@@ -105,6 +118,12 @@ RESET_STOP_LEARNING = ButtonEntityDescription(
     entity_category=EntityCategory.CONFIG,
 )
 
+RESET_THROTTLE_LEARNING = ButtonEntityDescription(
+    key="reset_throttle_learning",
+    translation_key="reset_throttle_learning",
+    entity_category=EntityCategory.CONFIG,
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -114,7 +133,12 @@ async def async_setup_entry(
     """Set up buttons."""
     coordinator = entry.runtime_data
     async_add_entities(DifluidButton(coordinator, desc) for desc in BUTTONS)
-    async_add_entities([DifluidResetStopButton(coordinator, RESET_STOP_LEARNING)])
+    async_add_entities(
+        [
+            DifluidResetStopButton(coordinator, RESET_STOP_LEARNING),
+            DifluidResetThrottleButton(coordinator, RESET_THROTTLE_LEARNING),
+        ]
+    )
 
 
 class DifluidButton(DifluidEntity, ButtonEntity):
@@ -133,3 +157,12 @@ class DifluidResetStopButton(DifluidStopEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Reset; works while the scale is off."""
         self.coordinator.autostop.async_reset()
+
+
+class DifluidResetThrottleButton(DifluidThrottleEntity, ButtonEntity):
+    """Forgets the learned pump power model and the learned prediction
+    exponent (back to their start values)."""
+
+    async def async_press(self) -> None:
+        """Reset; works while the scale is off."""
+        self.coordinator.autostop.throttle.async_reset()

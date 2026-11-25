@@ -661,6 +661,26 @@ def test_journal_migration_keeps_model() -> None:
 
 
 
+def test_parse_rejects_a_damaged_covariance() -> None:
+    """Audit B7: a negative, indefinite or asymmetric stored P is invalid
+    (prior instead); one update from it would divide by ~0 or blow up."""
+    base = {"tau": 1.0, "c": 0.4, "count": 12}
+    for p in (
+        [[-1.0, 0.0], [0.0, 1.0]],  # negative variance
+        [[1.0, 2.0], [2.0, 1.0]],  # indefinite (det < 0)
+        [[0.0, 0.0], [0.0, 0.0]],  # singular
+        [[1.0, 0.5], [0.1, 1.0]],  # not symmetric
+    ):
+        assert sm.StopModel.parse({**base, "p": p}) is None, p
+        model = sm.StopModel.from_dict({**base, "p": p})
+        assert model.count == 0  # the prior
+        assert model.update(2.0, 1.5) and all(
+            math.isfinite(v) for row in model.p for v in row
+        )
+    good = sm.StopModel.parse({**base, "p": [[0.02, -0.01], [-0.01, 0.05]]})
+    assert good is not None and good.count == 12
+
+
 def test_journal_parse_garbage() -> None:
     """Invalid journals give None (-> empty journal on the stored model);
     damaged entries are skipped one by one."""

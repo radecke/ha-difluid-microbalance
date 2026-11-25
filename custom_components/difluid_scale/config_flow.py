@@ -17,7 +17,8 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.const import CONF_ADDRESS, UnitOfMass, UnitOfTime
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.selector import (
     EntitySelector,
     EntitySelectorConfig,
@@ -37,9 +38,14 @@ from .beans import (
     BEAN_ID,
     BEAN_NAME,
     BEAN_NOTE,
+    BEAN_PROFILE,
     BEAN_RATIO,
+    BEAN_RATIOS,
+    BEAN_SHOT_TIME,
     RATIO_MAX,
     RATIO_MIN,
+    SHOT_TIME_MAX,
+    SHOT_TIME_MIN,
     beans_from_options,
     find_bean,
     make_bean,
@@ -47,12 +53,14 @@ from .beans import (
 )
 
 from .const import (
+    BEAN_NONE,
     CONF_BEANS,
     CONF_DOSE_LOOKBACK,
     CONF_DOSE_MAX,
     CONF_DOSE_MIN,
     CONF_MIN_DURATION,
     CONF_MIN_YIELD,
+    CONF_PUMP_POWER,
     CONF_STABILITY_SECONDS,
     CONF_STABILITY_TOLERANCE,
     CONF_STOP_SWITCH,
@@ -62,6 +70,7 @@ from .const import (
     LOCAL_NAME_PREFIX,
     SERVICE_UUID,
 )
+from .profiles import BUILTIN_LABELS, PROFILE_STANDARD, label_key
 
 
 def _number(
@@ -94,6 +103,10 @@ OPTIONS_SCHEMA = vol.Schema(
         vol.Optional(CONF_STOP_SWITCH): EntitySelector(
             EntitySelectorConfig(domain="switch")
         ),
+        # Pump throttle: the pump power (0-100 %); empty = observe only.
+        vol.Optional(CONF_PUMP_POWER): EntitySelector(
+            EntitySelectorConfig(domain="number")
+        ),
     }
 )
 
@@ -111,8 +124,29 @@ BEAN_SCHEMA = vol.Schema(
             )
         ),
         vol.Optional(BEAN_NOTE): TextSelector(TextSelectorConfig(multiline=True)),
+        # Pump throttle: target shot time for this bean; empty = global.
+        vol.Optional(BEAN_SHOT_TIME): _number(
+            SHOT_TIME_MIN, SHOT_TIME_MAX, 1, UnitOfTime.SECONDS
+        ),
     }
 )
+
+
+def bean_schema(profiles: list[str]) -> vol.Schema:
+    """BEAN_SCHEMA plus the bean's default pump profile (0.7.0): the labels
+    of the profile library and "none" (= no default, the active profile
+    stays)."""
+    return BEAN_SCHEMA.extend(
+        {
+            vol.Optional(BEAN_PROFILE): SelectSelector(
+                SelectSelectorConfig(
+                    options=[BEAN_NONE, *profiles],
+                    mode=SelectSelectorMode.DROPDOWN,
+                    translation_key="bean_profile",
+                )
+            ),
+        }
+    )
 
 
 def _is_supported(info: BluetoothServiceInfoBleak) -> bool:
@@ -125,6 +159,9 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for DiFluid Microbalance."""
 
     VERSION = 1
+    # 1.2 (0.7.0b2): the option ``tare_window`` is gone (see
+    # ``async_migrate_entry``).
+    MINOR_VERSION = 4
 
     @staticmethod
     @callback
@@ -202,6 +239,73 @@ class DifluidConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Move this entry to another scale (audit A6: e.g. a replacement).
+
+        Brew history, learned models and settings are stored per entry and
+        stay; entity and device registry entries are moved to the new
+        address (their unique ids carry it), so entity IDs and their
+        history stay too."""
+        entry = self._get_reconfigure_entry()
+        old: str = entry.data[CONF_ADDRESS]
+        if user_input is not None:
+            address: str = user_input[CONF_ADDRESS]
+            if address != old:
+                await self.async_set_unique_id(address, raise_on_progress=False)
+                self._abort_if_unique_id_configured()
+                _async_move_registries(self.hass, entry, old, address)
+            return self.async_update_reload_and_abort(
+                entry, unique_id=address, data_updates={CONF_ADDRESS: address}
+            )
+        others = self._async_current_ids(include_ignore=False) - {old}
+        found: dict[str, str] = {}
+        for info in async_discovered_service_info(self.hass, connectable=True):
+            if info.address in others or info.address in found:
+                continue
+            if _is_supported(info):
+                found[info.address] = info.name or info.address
+        if not found:
+            return self.async_abort(reason="no_devices_found")
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ADDRESS, default=old if old in found else vol.UNDEFINED
+                    ): vol.In(
+                        {addr: f"{name} ({addr})" for addr, name in found.items()}
+                    )
+                }
+            ),
+        )
+
+
+@callback
+def _async_move_registries(
+    hass: HomeAssistant, entry: ConfigEntry, old: str, new: str
+) -> None:
+    """Entity unique ids ``<address>_<key>`` and the device's identifier
+    and Bluetooth connection follow the new address."""
+    ent_reg = er.async_get(hass)
+    for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        prefix = f"{old}_"
+        if ent.unique_id.startswith(prefix):
+            ent_reg.async_update_entity(
+                ent.entity_id, new_unique_id=f"{new}_{ent.unique_id[len(prefix):]}"
+            )
+    dev_reg = dr.async_get(hass)
+    # Not ``async_get_device``: deprecated from HA 2026.11 on.
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if (DOMAIN, old) not in device.identifiers:
+            continue
+        dev_reg.async_update_device(
+            device.id,
+            new_identifiers={(DOMAIN, new)},
+            new_connections={(dr.CONNECTION_BLUETOOTH, new)},
+        )
+
 
 class DifluidOptionsFlow(OptionsFlow):
     """Menu: brew detection and stop switch, bean profiles."""
@@ -218,6 +322,16 @@ class DifluidOptionsFlow(OptionsFlow):
         return self.async_create_entry(
             data={**self.config_entry.options, CONF_BEANS: beans}
         )
+
+    def _profile_labels(self) -> list[str]:
+        entry = self.config_entry
+        try:
+            return list(entry.runtime_data.autostop.throttle.profiles.library.labels)
+        except AttributeError:  # not loaded: the built-ins only
+            return list(BUILTIN_LABELS)
+
+    def _bean_schema(self) -> vol.Schema:
+        return bean_schema(self._profile_labels())
 
     def _bean_select(self) -> SelectSelector:
         return SelectSelector(
@@ -254,7 +368,11 @@ class DifluidOptionsFlow(OptionsFlow):
                     if k not in DETECTION_KEYS
                 }
                 return self.async_create_entry(data={**kept, **user_input})
-        values = {**DEFAULT_OPTIONS, **self.config_entry.options, **(user_input or {})}
+        values = {
+            **DEFAULT_OPTIONS,
+            **self.config_entry.options,
+            **(user_input or {}),
+        }
         return self.async_show_form(
             step_id="detection",
             data_schema=self.add_suggested_values_to_schema(OPTIONS_SCHEMA, values),
@@ -266,12 +384,37 @@ class DifluidOptionsFlow(OptionsFlow):
         return {BEAN_NAME: error} if error else {}
 
     @staticmethod
-    def _bean_from_input(bean_id: str, user_input: dict[str, Any]) -> dict[str, Any]:
+    def _bean_from_input(
+        bean_id: str,
+        user_input: dict[str, Any],
+        old: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The bean from the form. ``ratio`` is its ratio for the profile
+        chosen in the form (Standard without one); its ratios for the other
+        profiles (edit: ``old``) are kept. When the form changes the
+        profile but leaves the ratio as shown, no ratio is written for the
+        new profile (it was the old profile's)."""
+        profile = (
+            None
+            if user_input.get(BEAN_PROFILE) in (None, BEAN_NONE)
+            else user_input.get(BEAN_PROFILE)
+        )
+        write_ratio = True
+        if old is not None:
+            moved = label_key(profile or PROFILE_STANDARD) != label_key(
+                old.get(BEAN_PROFILE) or PROFILE_STANDARD
+            )
+            untouched = round(float(user_input[BEAN_RATIO]), 2) == old.get(BEAN_RATIO)
+            write_ratio = not (moved and untouched)
         return make_bean(
             bean_id,
             user_input[BEAN_NAME],
             user_input[BEAN_RATIO],
             user_input.get(BEAN_NOTE),
+            user_input.get(BEAN_SHOT_TIME),
+            profile,
+            None if old is None else old.get(BEAN_RATIOS),
+            write_ratio,
         )
 
     async def async_step_add_bean(
@@ -287,7 +430,7 @@ class DifluidOptionsFlow(OptionsFlow):
         return self.async_show_form(
             step_id="add_bean",
             data_schema=self.add_suggested_values_to_schema(
-                BEAN_SCHEMA, user_input or {}
+                self._bean_schema(), user_input or {}
             ),
             errors=errors,
         )
@@ -315,15 +458,18 @@ class DifluidOptionsFlow(OptionsFlow):
         if user_input is not None:
             errors = self._bean_errors(user_input, bean[BEAN_ID])
             if not errors:
-                new = self._bean_from_input(bean[BEAN_ID], user_input)
+                new = self._bean_from_input(bean[BEAN_ID], user_input, bean)
                 return self._save_beans(
                     [new if b[BEAN_ID] == bean[BEAN_ID] else b for b in self._beans]
                 )
         values = {k: v for k, v in bean.items() if v is not None}
+        # A profile deleted since cannot be suggested (not an option).
+        if values.get(BEAN_PROFILE) not in self._profile_labels():
+            values.pop(BEAN_PROFILE, None)
         return self.async_show_form(
             step_id="edit_bean_details",
             data_schema=self.add_suggested_values_to_schema(
-                BEAN_SCHEMA, {**values, **(user_input or {})}
+                self._bean_schema(), {**values, **(user_input or {})}
             ),
             errors=errors,
             description_placeholders={"name": bean[BEAN_NAME]},

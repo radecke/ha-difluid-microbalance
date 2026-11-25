@@ -16,6 +16,7 @@ from .autostop import AUTOSTOP_EVENT_TYPES
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
 from .entity import DifluidEntity, _device_info
 from .protocol import KEY_EVENT_TYPES
+from .throttle_model import THROTTLE_EVENT_TYPES
 
 PARALLEL_UPDATES = 0
 
@@ -32,6 +33,12 @@ AUTO_STOP = EventEntityDescription(
     event_types=list(AUTOSTOP_EVENT_TYPES),
 )
 
+THROTTLE = EventEntityDescription(
+    key="throttle",
+    translation_key="throttle",
+    event_types=list(THROTTLE_EVENT_TYPES),
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -44,6 +51,7 @@ async def async_setup_entry(
         [
             DifluidKeyEvent(coordinator, KEY_PRESS),
             DifluidAutoStopEvent(coordinator, AUTO_STOP),
+            DifluidThrottleEvent(coordinator, THROTTLE),
         ]
     )
 
@@ -95,3 +103,18 @@ class DifluidAutoStopEvent(EventEntity):
     def _async_handle(self, event_type: str, data: dict[str, Any]) -> None:
         self._trigger_event(event_type, data)
         self.async_write_ha_state()
+
+
+class DifluidThrottleEvent(DifluidAutoStopEvent):
+    """Pump throttle: ``triggered`` (shot predicted too fast, first power),
+    ``corrected`` (power changed), ``ended`` (shot over, pump back to
+    100 %). Fired in ``observe`` too (``applied`` false: not set)."""
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to the throttle events (not the auto-stop's)."""
+        await EventEntity.async_added_to_hass(self)
+        self.async_on_remove(
+            self.coordinator.autostop.throttle.async_add_event_listener(
+                self._async_handle
+            )
+        )

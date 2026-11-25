@@ -8,14 +8,16 @@ from homeassistant.components.number import (
     NumberEntityDescription,
     NumberMode,
 )
-from homeassistant.const import UnitOfMass
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfMass, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import DifluidConfigEntry
-from .entity import DifluidBrewEntity, DifluidStopEntity
+from .entity import DifluidBrewEntity, DifluidStopEntity, DifluidThrottleEntity
+from .throttle import FLOOR_MAX, FLOOR_MIN, TARGET_TIME_MAX, TARGET_TIME_MIN
+from .throttle_model import POWER_MAX
 
 PARALLEL_UPDATES = 0
 
@@ -50,6 +52,38 @@ TARGET_RATIO = NumberEntityDescription(
     mode=NumberMode.BOX,
 )
 
+TARGET_SHOT_TIME = NumberEntityDescription(
+    key="target_shot_time",
+    translation_key="target_shot_time",
+    device_class=NumberDeviceClass.DURATION,
+    native_unit_of_measurement=UnitOfTime.SECONDS,
+    native_min_value=TARGET_TIME_MIN,
+    native_max_value=TARGET_TIME_MAX,
+    native_step=1.0,
+    mode=NumberMode.BOX,
+)
+
+THROTTLE_FLOOR = NumberEntityDescription(
+    key="throttle_floor",
+    translation_key="throttle_floor",
+    native_unit_of_measurement=PERCENTAGE,
+    native_min_value=FLOOR_MIN,
+    native_max_value=FLOOR_MAX,
+    native_step=1.0,
+    mode=NumberMode.BOX,
+    entity_category=EntityCategory.CONFIG,
+)
+
+STANDARD_PUMP_POWER = NumberEntityDescription(
+    key="standard_pump_power",
+    translation_key="standard_pump_power",
+    native_unit_of_measurement=PERCENTAGE,
+    native_max_value=POWER_MAX,
+    native_step=1.0,
+    mode=NumberMode.BOX,
+    entity_category=EntityCategory.CONFIG,
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -63,6 +97,9 @@ async def async_setup_entry(
             DifluidDoseNumber(coordinator, DOSE_CORRECTION),
             DifluidTargetYieldNumber(coordinator, TARGET_YIELD),
             DifluidTargetRatioNumber(coordinator, TARGET_RATIO),
+            DifluidTargetShotTimeNumber(coordinator, TARGET_SHOT_TIME),
+            DifluidThrottleFloorNumber(coordinator, THROTTLE_FLOOR),
+            DifluidStandardPowerNumber(coordinator, STANDARD_PUMP_POWER),
         ]
     )
 
@@ -117,3 +154,59 @@ class DifluidTargetRatioNumber(DifluidStopEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set a new ratio (takes effect on the next sample)."""
         self.coordinator.autostop.set_ratio(value)
+
+
+class DifluidTargetShotTimeNumber(DifluidThrottleEntity, NumberEntity):
+    """Pump throttle: target shot time (relay on -> pump off), global.
+
+    A bean profile can set its own; the attribute ``effective`` shows the
+    one the next brew gets."""
+
+    @property
+    def native_value(self) -> float:
+        """Global target shot time (s)."""
+        return self.coordinator.autostop.throttle.target_time
+
+    @property
+    def extra_state_attributes(self) -> dict[str, float]:
+        """The target shot time for the active bean."""
+        return {"effective": self.coordinator.autostop.throttle.effective_target_time()}
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set a new global target shot time."""
+        self.coordinator.autostop.throttle.set_target_time(value)
+
+
+class DifluidThrottleFloorNumber(DifluidThrottleEntity, NumberEntity):
+    """Pump throttle: lowest power it sets (% of the pump entity's range)."""
+
+    @property
+    def native_value(self) -> float:
+        """Floor in %."""
+        return self.coordinator.autostop.throttle.floor
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set a new floor."""
+        self.coordinator.autostop.throttle.set_floor(value)
+
+
+class DifluidStandardPowerNumber(DifluidThrottleEntity, NumberEntity):
+    """Power of the pump profile Standard (0.7.0b4): % of the pump
+    entity's range, from the throttle floor to 100 (100 = full power, as
+    before). Global, not per bean; takes effect at the next relay start.
+    Without a pump power entity nothing is set (observe: only recorded)."""
+
+    @property
+    def native_min_value(self) -> float:
+        """The floor: lower powers run at the floor anyway."""
+        return self.coordinator.autostop.throttle.floor
+
+    @property
+    def native_value(self) -> float:
+        """The power Standard runs at (at least the floor)."""
+        throttle = self.coordinator.autostop.throttle
+        return max(throttle.floor, throttle.standard_power)
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the power."""
+        self.coordinator.autostop.throttle.set_standard_power(value)

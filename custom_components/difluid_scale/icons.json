@@ -3,11 +3,17 @@
     "button": {
       "reset_stop_learning": {
         "default": "mdi:restore"
+      },
+      "reset_throttle_learning": {
+        "default": "mdi:restore"
       }
     },
     "event": {
       "auto_stop": {
         "default": "mdi:stop-circle-outline"
+      },
+      "throttle": {
+        "default": "mdi:speedometer-slow"
       }
     },
     "number": {
@@ -16,16 +22,48 @@
       },
       "target_yield": {
         "default": "mdi:target"
+      },
+      "target_shot_time": {
+        "default": "mdi:timer-outline"
+      },
+      "throttle_floor": {
+        "default": "mdi:arrow-collapse-down"
+      },
+      "standard_pump_power": {
+        "default": "mdi:water-pump"
       }
     },
     "select": {
       "bean": {
         "default": "mdi:seed-outline"
+      },
+      "throttle_mode": {
+        "default": "mdi:speedometer-slow"
+      },
+      "pump_profile": {
+        "default": "mdi:chart-timeline-variant"
       }
     },
     "switch": {
       "brew_ready": {
         "default": "mdi:coffee-outline"
+      },
+      "throttle_learning": {
+        "default": "mdi:school-outline"
+      }
+    },
+    "sensor": {
+      "predicted_shot_time": {
+        "default": "mdi:timer-sand"
+      },
+      "last_pump_power": {
+        "default": "mdi:pump"
+      },
+      "throttle_power_exponent": {
+        "default": "mdi:chart-bell-curve"
+      },
+      "throttle_samples": {
+        "default": "mdi:counter"
       }
     }
   },
@@ -41,6 +79,15 @@
     },
     "delete_bean": {
       "service": "mdi:seed-off-outline"
+    },
+    "import_profile": {
+      "service": "mdi:file-import-outline"
+    },
+    "delete_profile": {
+      "service": "mdi:delete-outline"
+    },
+    "export_profile": {
+      "service": "mdi:file-export-outline"
     }
   }
 }

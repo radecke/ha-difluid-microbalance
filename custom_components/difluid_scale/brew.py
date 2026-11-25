@@ -52,6 +52,31 @@ RESUME_MIN_COUNTS = 2
 # been missed) a resume must imply the same start within this tolerance.
 RESUME_OBSERVED_GAP_SECONDS = 5.0
 
+# Backlog (0.7.0b6): frames that reach the integration late and bunched -
+# a stalled Home Assistant event loop or BLE stack delivers the queued
+# notifications in one go - carry the scale timer of when they were taken.
+# Consecutive frames this close together form one burst. The scale sends a
+# frame about every 0.1-0.4 s; inside the observed backlogs (2026-11-25)
+# frames were at most 16 ms apart, so 50 ms separates the two.
+BACKLOG_BURST_SECONDS = 0.05
+# A frame counts as late when it arrives this long after its timer second
+# ended. Normal arrival jitter reached 0.25 s past the second (2026-11-25):
+# twice that, two profile ticks.
+BACKLOG_LATE_SECONDS = 0.5
+# Same timer count while frames keep coming (no silence) for longer than one
+# count plus BACKLOG_LATE_SECONDS: the timer stopped or paused, its counts
+# no longer map to the brew clock as before (offset estimate restarts).
+BACKLOG_PAUSE_SECONDS = TIMER_UNIT_SECONDS + BACKLOG_LATE_SECONDS
+# Frames whose placement may still change, at most (a late run that never
+# ends must not make every frame cost the whole run).
+BACKLOG_PENDING_MAX = 64
+# Pace check: between frames at the normal cadence the timer must count
+# about once per second of arrival time, summed over at least this long;
+# otherwise it counts in another unit and nothing is moved (old behaviour).
+BACKLOG_PACE_SECONDS = 8.0
+BACKLOG_PACE_MIN = 0.75
+BACKLOG_PACE_MAX = 1.6
+
 # Flow values below this are treated as "the scale reports no flow".
 _FLOW_EPSILON = 0.05
 
@@ -218,6 +243,357 @@ class _ResumeCandidate:
     probe: tuple[float, int, float, float] | None = None
 
 
+@dataclass
+class _Frame:
+    """One sensor frame of the running brew.
+
+    ``arrival`` and ``placed`` are on the clock's own (monotonic) axis,
+    ``rel`` is the arrival on the brew clock (s since the start)."""
+
+    arrival: float
+    rel: float
+    weight: float
+    flow: float
+    count: int | None  # timer counts since the brew start (timer - base)
+    placed: float = 0.0
+    backlog: bool = False
+    # Part of a bunch arriving on time (no frame of it late): spread over
+    # its timer second up to its arrival in the profile, not a backlog.
+    bunched: bool = False
+
+    @property
+    def placed_rel(self) -> float:
+        """The placement on the brew clock."""
+        return self.rel - (self.arrival - self.placed)
+
+
+class BacklogClock:
+    """Places backlog frames of a running brew at their scale time.
+
+    Times are monotonic (a wall clock step must not look like a delay).
+    A frame arrives *late* when it comes more than BACKLOG_LATE_SECONDS
+    after its timer second ended. Two signs that frames were held back
+    while the timer ran (a stalled event loop or BLE stack delivering the
+    queued notifications at once):
+
+    - a burst (gaps <= BACKLOG_BURST_SECONDS) spanning two or more timer
+      counts with at least one late frame;
+    - a run of late frames in which (or by the next frame) the timer counts
+      ahead of the arrivals: more timer seconds pass than arrival time, by
+      more than BACKLOG_LATE_SECONDS (the queue is caught up), or one right
+      before such a burst.
+
+    Those frames go to their timer second, the frames of one count spread
+    evenly over it, never later than the frame arrived and never before an
+    earlier frame. A bunch with no late frame (a hold-up shorter than the
+    lateness threshold) is spread the same way in the profile only
+    (``bunched``); it is no backlog. Late frames whose counts are only
+    shifted - evenly late, counting at the pace of the arrivals: a timer
+    paused while no frames came - re-learn the offset instead.
+
+    The timer second of count ``c`` starts at ``offset + c``. ``offset`` is
+    the smallest ``arrival - c`` seen: a count cannot arrive before it
+    began, so every frame bounds it from above and late frames never lower
+    it. It is re-learned when the count stood still while frames kept
+    coming (paused timer), after an even shift (above), and when the count
+    goes back (reset, uint16 wrap). Nothing is moved (the old behaviour)
+    without a usable count: none, 0, ahead of its arrival, or a timer that
+    does not count about once per second of arrival time (another unit).
+
+    ``pending`` holds the trailing frames whose placement can still change
+    (current burst, current late run; at most BACKLOG_PENDING_MAX).
+    """
+
+    def __init__(self) -> None:
+        """Start empty (one clock per brew)."""
+        self.offset: float | None = None
+        self.pending: list[_Frame] = []
+        self.finalized: list[_Frame] = []
+        self._prev_placed = -math.inf
+        self._last_arrival: float | None = None
+        self._last_count: int | None = None
+        self._still_count: int | None = None
+        self._still_since = 0.0
+        self._silence_before = True  # the newest frame came after a silence
+        # Pace check since the offset was (re)learned: arrival time and
+        # counts summed over steps between frames at the normal cadence
+        # (no burst, no silence).
+        self._pace_dt = 0.0
+        self._pace_dc = 0
+
+    def _relearn(self, pace: bool = True) -> None:
+        self.offset = None
+        if pace:
+            self._pace_dt = 0.0
+            self._pace_dc = 0
+
+    def lateness(self, arrival: float, count: int | None) -> float | None:
+        """Seconds the frame arrived after its timer second ended (None:
+        not known)."""
+        if self.offset is None or count is None or count < 1:
+            return None
+        return arrival - (self.offset + (count + 1) * TIMER_UNIT_SECONDS)
+
+    def _late_count(self, arrival: float, count: int) -> bool:
+        late = self.lateness(arrival, count)
+        return late is not None and late > BACKLOG_LATE_SECONDS
+
+    def _late(self, f: _Frame) -> bool:
+        if not self._usable(f):
+            return False
+        late = self.lateness(f.arrival, f.count)
+        return late is not None and late > BACKLOG_LATE_SECONDS
+
+    @property
+    def paced(self) -> bool:
+        """The timer counts about once per second of arrival time (or too
+        little is known yet to say otherwise)."""
+        if self._pace_dt < BACKLOG_PACE_SECONDS:
+            return True
+        rate = self._pace_dc * TIMER_UNIT_SECONDS / self._pace_dt
+        return BACKLOG_PACE_MIN <= rate <= BACKLOG_PACE_MAX
+
+    def _usable(self, f: _Frame) -> bool:
+        return (
+            self.offset is not None
+            and f.count is not None
+            and f.count >= 1
+            # A count ahead of its arrival is implausible.
+            and self.offset + f.count * TIMER_UNIT_SECONDS
+            <= f.arrival + BACKLOG_LATE_SECONDS
+            and self.paced
+        )
+
+    def plain(self, rel: float, arrival: float | None = None) -> None:
+        """A sample recorded without a timer: everything pending is final
+        (``finalized``)."""
+        self.finalized = list(self.pending)
+        if self.pending:
+            self._prev_placed = max(self._prev_placed, self.pending[-1].placed)
+        self.pending = []
+        if arrival is not None:
+            self._prev_placed = max(self._prev_placed, arrival)
+        self._last_arrival = None
+
+    def add(
+        self,
+        arrival: float,
+        rel: float,
+        weight: float,
+        flow: float,
+        count: int | None,
+    ) -> int:
+        """Add a frame; place the pending frames (the new one last).
+
+        Returns how many frames at the front of ``pending`` are final now
+        (removed from it after placing, also in ``finalized``)."""
+        last = self._last_arrival
+        gap = None if last is None else arrival - last
+        self._last_arrival = arrival
+        self._silence_before = gap is None or gap > SAMPLE_SILENCE_SECONDS
+        prev_count = self._last_count
+        if count is not None and prev_count is not None and count < prev_count:
+            self._relearn()  # reset or uint16 wrap: another count origin
+        elif (
+            count is not None
+            and prev_count is not None
+            and gap is not None
+            and BACKLOG_BURST_SECONDS < gap <= SAMPLE_SILENCE_SECONDS
+            # Not while it stands still (paused timer: no pace to measure).
+            and (count != prev_count or arrival - self._still_since <= BACKLOG_PAUSE_SECONDS)
+            # Only frames on time: a queue drained at the normal cadence
+            # counts faster than it arrives and is no measure of the unit.
+            and not self._late_count(arrival, count)
+        ):
+            self._pace_dt += gap
+            self._pace_dc += count - prev_count
+        if count is not None:
+            self._last_count = count
+        # Paused timer: the same count across steady frames.
+        if (
+            count is None
+            or gap is None
+            or gap > SAMPLE_SILENCE_SECONDS
+            or count != self._still_count
+        ):
+            self._still_count, self._still_since = count, arrival
+        elif arrival - self._still_since > BACKLOG_PAUSE_SECONDS:
+            self._relearn(pace=False)
+            self._still_since = arrival
+        if count is not None and count >= 1:
+            bound = arrival - count * TIMER_UNIT_SECONDS
+            if self.offset is None or bound < self.offset:
+                self.offset = bound
+        frame = _Frame(arrival, rel, weight, flow, count)
+        self.pending.append(frame)
+        pending = self.pending
+        self._place(pending)
+        if self._shifted(pending):
+            self._place(pending)
+        # Still open: the current burst and, while frames come late, the
+        # current late run.
+        keep = len(pending) - 1
+        while keep > 0 and pending[keep].arrival - pending[keep - 1].arrival <= (
+            BACKLOG_BURST_SECONDS
+        ):
+            keep -= 1
+        if self._late(frame):
+            run = len(pending) - 1
+            while run > 0 and self._late(pending[run - 1]):
+                run -= 1
+            keep = min(keep, run)
+        keep = max(keep, len(pending) - BACKLOG_PENDING_MAX)
+        self.finalized = pending[:keep]
+        if keep:
+            self._prev_placed = max(self._prev_placed, pending[keep - 1].placed)
+            del pending[:keep]
+        return keep
+
+    def provisional(self, f: _Frame) -> float:
+        """Placement of the newest frame for consumers that cannot wait
+        for the burst to end (the cut rule): a late frame in its timer
+        second, everything else at its arrival (clock axis)."""
+        if f.backlog:
+            return f.placed
+        if self._late(f) and self._held_back_hint(f):
+            assert self.offset is not None and f.count is not None
+            mid = self.offset + (f.count + 0.5) * TIMER_UNIT_SECONDS
+            return min(f.arrival, max(mid, self._prev_placed))
+        return f.arrival
+
+    def _held_back_hint(self, f: _Frame) -> bool:
+        """The late frame comes right after a silence or inside a burst (a
+        queue delivered at once). Late frames at the normal cadence (a
+        timer paused without frames, until the offset is re-learned) keep
+        their arrival, so the cut rule's clock does not stand still."""
+        i = self.pending.index(f) if f in self.pending else -1
+        if i <= 0:
+            return self._silence_before
+        return f.arrival - self.pending[i - 1].arrival <= BACKLOG_BURST_SECONDS
+
+    def _shifted(self, frames: list[_Frame]) -> bool:
+        """The trailing late frames are evenly late and count at the pace
+        of their arrivals (no burst, no catch-up) over at least two counts:
+        the timer was paused while no frames came. Re-learn the offset from
+        them; True when it changed."""
+        run: list[_Frame] = []
+        for f in reversed(frames):
+            if not self._late(f) or f.backlog:
+                break
+            run.append(f)
+        run.reverse()
+        if len(run) < 3 or run[-1].count - run[0].count < 2:  # type: ignore[operator]
+            return False
+        if any(b.arrival - a.arrival <= BACKLOG_BURST_SECONDS for a, b in zip(run, run[1:])):
+            return False
+        lates = [self.lateness(f.arrival, f.count) or 0.0 for f in run]
+        if max(lates) - min(lates) > TIMER_UNIT_SECONDS + BACKLOG_LATE_SECONDS:
+            return False
+        span = run[-1].arrival - run[0].arrival
+        rate = (run[-1].count - run[0].count) * TIMER_UNIT_SECONDS / span if span > 0 else math.inf  # type: ignore[operator]
+        if not BACKLOG_PACE_MIN <= rate <= BACKLOG_PACE_MAX:
+            return False  # counting faster than arriving: a queue, not a shift
+        self.offset = min(f.arrival - f.count * TIMER_UNIT_SECONDS for f in run)  # type: ignore[operator]
+        return True
+
+    @staticmethod
+    def _catches_up(run: list[_Frame]) -> bool:
+        """The timer ran ahead of the arrivals: between the run's first
+        frame and a later one more timer seconds passed (at least the counts
+        in between) than arrival time, by more than BACKLOG_LATE_SECONDS.
+        A timer that was paused (its counts shifted) never does."""
+        first = run[0]
+        counts = [f.count for f in run]
+        if any(b < a for a, b in zip(counts, counts[1:])):  # type: ignore[operator]
+            return False
+        return any(
+            (f.count - first.count - 1) * TIMER_UNIT_SECONDS  # type: ignore[operator]
+            - (f.arrival - first.arrival)
+            > BACKLOG_LATE_SECONDS
+            for f in run[1:]
+        )
+
+    def _backlog_flags(self, frames: list[_Frame]) -> list[bool]:
+        """Per frame: backlog. Sets ``bunched`` on on-time bunches."""
+        n = len(frames)
+        flags = [False] * n
+        for f in frames:
+            f.bunched = False
+        # Bursts.
+        i = 0
+        while i < n:
+            j = i + 1
+            while j < n and frames[j].arrival - frames[j - 1].arrival <= (
+                BACKLOG_BURST_SECONDS
+            ):
+                j += 1
+            burst = frames[i:j]
+            counts = [f.count for f in burst]
+            if (
+                j - i >= 2
+                and all(self._usable(f) for f in burst)
+                and all(b >= a for a, b in zip(counts, counts[1:]))  # type: ignore[operator]
+            ):
+                if counts[-1] > counts[0] and any(self._late(f) for f in burst):  # type: ignore[operator]
+                    flags[i:j] = [True] * (j - i)
+                elif not any(self._late(f) for f in burst):
+                    for f in burst:
+                        f.bunched = True
+            i = j
+        # Late runs the timer evidently ran through.
+        i = 0
+        while i < n:
+            if not self._late(frames[i]):
+                i += 1
+                continue
+            j = i
+            while j < n and self._late(frames[j]):
+                j += 1
+            run = frames[i : j + 1] if j < n else frames[i:j]
+            if all(self._usable(f) for f in run) and (
+                self._catches_up(run)
+                # Right before a burst over several counts: the same queue.
+                or (j < n and flags[j] and run[-2].count <= run[-1].count)  # type: ignore[operator]
+            ):
+                flags[i:j] = [True] * (j - i)
+            i = j
+        return flags
+
+    def _place(self, frames: list[_Frame]) -> None:
+        flags = self._backlog_flags(frames)
+        prev = self._prev_placed
+        i = 0
+        while i < len(frames):
+            f = frames[i]
+            if not flags[i] and not f.bunched:
+                f.backlog = False
+                f.placed = max(f.arrival, prev)
+                prev = f.placed
+                i += 1
+                continue
+            j = i
+            while (
+                j < len(frames)
+                and flags[j] == flags[i]
+                and frames[j].bunched == f.bunched
+                and frames[j].count == f.count
+            ):
+                j += 1
+            group = frames[i:j]
+            assert self.offset is not None and f.count is not None
+            lo = max(self.offset + f.count * TIMER_UNIT_SECONDS, prev)
+            hi = max(
+                lo,
+                min(self.offset + (f.count + 1) * TIMER_UNIT_SECONDS, f.arrival),
+            )
+            k = len(group)
+            for n, g in enumerate(group):
+                g.backlog = flags[i]
+                g.placed = min(g.arrival, lo + (hi - lo) * (n + 0.5) / k)
+            prev = group[-1].placed
+            i = j
+
+
 IDLE = "idle"
 BREWING = "brewing"
 TAIL = "tail"
@@ -251,6 +627,14 @@ class BrewTracker:
         # Timer value a new brew counts from: the stop value of a brew that
         # can no longer be continued (cup lifted, new dose) without a reset.
         self._next_base = 0
+        self._last_clock: tuple[float, int, BacklogClock] | None = None
+        # Newest frame: its provisional placement (caller's clock, see
+        # data_time; None: at its arrival) and how late it arrived after its
+        # timer second (s, None: unknown), as known when it came.
+        self.last_placed: float | None = None
+        self.last_lateness: float | None = None
+        # Backlog stretches of the brew finished last: (start, spans).
+        self.finished_backlog: tuple[float, list[tuple[float, float]]] | None = None
         self._reset_brew()
 
     def _reset_brew(self) -> None:
@@ -259,6 +643,19 @@ class BrewTracker:
         self._dose_plateau: Plateau | None = None
         self._buckets: dict[int, tuple[float, float, float]] = {}
         self._last_key = -1
+        # Every recorded sample in recording order (the buckets keep the
+        # last one per tick); the trailing ones from _burst_at on are the
+        # clock's current burst, re-placed while it grows.
+        self._samples: list[tuple[float, float, float]] = []
+        self._burst_at = 0
+        self._final_rel = -math.inf  # placement of the last final sample
+        # data_time of this brew so far (never goes back within a brew).
+        self._data_floor = -math.inf
+        self._clock = BacklogClock()
+        # Lowest bucket changed after newer ones existed (live replace).
+        self._revised: int | None = None
+        # Backlog stretches of this brew, (first, last) placed (caller's clock).
+        self.backlog_spans: list[tuple[float, float]] = []
         self._last_weight: float | None = None
         self._tail_max: float | None = None
         self._last_timer_change: float | None = None
@@ -280,6 +677,11 @@ class BrewTracker:
         # timer only counts as running once a later frame shows a higher one
         # (it may have stopped just before that frame).
         self._probe: tuple[float, int] | None = None
+        # First frame after a gap that looked like a frozen timer: (t,
+        # timer), and its gap tail sample until the next frame decides
+        # (a backlog shows a higher count right behind it).
+        self._gap_frame: tuple[float, int, float] | None = None
+        self._gap_pending: tuple[float, float, float] | None = None
 
     @property
     def _tail_seconds(self) -> float:
@@ -356,12 +758,37 @@ class BrewTracker:
     # ----------------------------------------------------------------- input
 
     def feed_sample(
-        self, t: float, weight: float, flow: float, timer: int | None
+        self,
+        t: float,
+        weight: float,
+        flow: float,
+        timer: int | None,
+        mono: float | None = None,
     ) -> BrewResult | None:
-        """Feed one sensor sample; return a brew when one completes."""
+        """Feed one sensor sample; return a brew when one completes.
+
+        ``mono``: its arrival on a monotonic clock (backlog detection; a
+        wall clock step must not look like a delay), default ``t``."""
+        if (
+            self.state == BREWING
+            and self._last_sample_t is not None
+            and t - self._last_sample_t > SAMPLE_SILENCE_SECONDS
+        ):
+            # The ticks of the silence did not run (stalled event loop):
+            # catch up with the last sample time as it was, so a stall due
+            # in the silence parks the brew (silence, not a timer stop)
+            # before this frame is looked at. From BREWING with the old
+            # sample time older than SAMPLE_SILENCE_SECONDS, tick() can only
+            # park (or do nothing): it never finishes a brew here.
+            caught_up = self.tick(t)
+            assert caught_up is None, "catching up ticks finished a brew"
         prev_timer, self._last_timer = self._last_timer, timer
         prev_sample_t, self._last_sample_t = self._last_sample_t, t
         self.last_sample = (t, weight, flow, timer)
+        self.last_placed = None
+        self.last_lateness = None
+        if mono is None:
+            mono = t
         increased = timer is not None and prev_timer is not None and timer > prev_timer
         # Only a count between close frames is an observed advance (start,
         # resume): across a gap the timer may have counted up and stopped.
@@ -388,6 +815,8 @@ class BrewTracker:
         if went_back:
             self._resumable = False
 
+        if self._gap_frame is not None:
+            self._gap_backlog(t, timer)  # a backlog: back to brewing
         if self.state == PARKED:
             result, handled = self._feed_parked(t, weight, flow, timer)
             if handled:
@@ -405,7 +834,7 @@ class BrewTracker:
         if self.state == TAIL and self._cup_lifted(weight):
             # Yield = last sample before the drop; the tail ends here.
             return self._finish()
-        self._record(t, weight, flow)
+        self._record_frame(t, weight, flow, timer, mono)
         if self.state == BREWING:
             if went_back:  # reset while running
                 self._stop(self._expected_stop(t))
@@ -473,6 +902,8 @@ class BrewTracker:
 
     def tick(self, t: float) -> BrewResult | None:
         """Advance time without a sample (stall check, end of tail, parking)."""
+        if self._gap_frame is not None:
+            self._gap_backlog(t, None)
         if self.state == PARKED:
             if t - self._parked_at >= self.config.park_grace_seconds:
                 self._stop_t = max(self._park_sample_t or self._t0, self._t0)
@@ -495,7 +926,10 @@ class BrewTracker:
                 # (or the disconnect) tell; the grace period is the backstop.
                 self._park(t)
                 return None
-        if self.state == TAIL and t >= self._stop_t + self._tail_seconds:
+        if (
+            self.state == TAIL
+            and t >= self._stop_t + self._tail_seconds
+        ):
             return self._finish()
         return None
 
@@ -642,11 +1076,48 @@ class BrewTracker:
             # Running once a later frame shows a higher count.
             self._probe = (t, timer)
             return None, False
-        # Timer stopped (frozen) during the gap: it stopped at its value.
-        self._stop(min(t, self._t0 + (timer - self._base) * TIMER_UNIT_SECONDS))
-        if not self._cup_lifted(weight):
-            self._gap_tail(t, weight, flow)
+        # Another start implied: the timer stopped (frozen) during the gap at
+        # its value - or the frames were held back (a backlog, the timer
+        # ran on; BacklogClock). Decided by the next frames: a higher count
+        # = it runs; the same count for longer than a count (plus the
+        # lateness margin) or a lower one = it stopped at this value. Until
+        # then the brew stays brewing, so the cut rule keeps checking
+        # (0.7.0b6; before, it was stopped at once and resumed two counts
+        # later).
+        stop_t = min(t, self._t0 + (timer - self._base) * TIMER_UNIT_SECONDS)
+        self._gap_frame = (t, timer, stop_t)
+        last = self._last_weight
+        lifted = weight < 0 or (last is not None and weight < last - TAIL_DROP_GRAMS)
+        self._gap_pending = None if lifted else (t, weight, flow)
         return None, False
+
+    def _gap_backlog(self, t: float, timer: int | None) -> bool:
+        """After a gap with another implied start: True if this frame shows
+        the timer ran on (a higher count: backlog or running); a lower
+        count, or the same one for longer than BACKLOG_PAUSE_SECONDS (also
+        on a tick, ``timer`` None), stops the brew at the gap frame's count
+        with the gap tail."""
+        frame = self._gap_frame
+        if frame is None or self.state != BREWING:
+            self._gap_frame = self._gap_pending = None
+            return False
+        gap_t, gap_timer, stop_t = frame
+        if timer is not None and timer > gap_timer:
+            self._gap_frame = self._gap_pending = None
+            self._last_timer_change = t
+            return True
+        if timer is not None and timer == gap_timer and t - gap_t <= BACKLOG_PAUSE_SECONDS:
+            return False  # not decided yet
+        if timer is None and t - gap_t <= BACKLOG_PAUSE_SECONDS:
+            return False
+        pending, self._gap_pending, self._gap_frame = self._gap_pending, None, None
+        last_timer = self._last_timer
+        self._last_timer = gap_timer  # the stop value
+        self._stop(stop_t)
+        self._last_timer = last_timer
+        if pending is not None:
+            self._gap_tail(*pending)
+        return False
 
     def _park(self, t: float) -> None:
         self.state = PARKED
@@ -686,10 +1157,15 @@ class BrewTracker:
         self._dose_plateau = res.dose_plateau
         self._reopened = res.accepted
         for point in res.points:
-            key = int(point[0] / PROFILE_RESOLUTION)
-            self._buckets[key] = point
-            self._last_key = max(self._last_key, key)
+            self._put(point)
             self._last_weight = point[1]
+        self._burst_at = len(self._samples)
+        last = self._last_clock
+        if last is not None and last[0] == res.t0 and last[1] == res.base:
+            self._clock = last[2]
+        if res.points:
+            self._clock.plain(res.points[-1][0])
+            self._final_rel = res.points[-1][0]
         last_rel = res.points[-1][0] if res.points else -1.0
         self.plateau.clear_window()
         for sample in self._preroll:
@@ -745,18 +1221,141 @@ class BrewTracker:
         ref = self._last_timer_change
         self._stop_ref_t = self._stop_t if ref is None else min(ref, self._stop_t)
 
+    def _put(self, point: tuple[float, float, float]) -> None:
+        """Store a sample (point relative to the start) in its bucket."""
+        key = int(point[0] / PROFILE_RESOLUTION)
+        self._samples.append(point)
+        self._buckets[key] = point
+        self._last_key = max(self._last_key, key)
+
     def _record(self, t: float, weight: float, flow: float) -> None:
+        """A sample without a timer count (preroll, gap tail): at ``t``."""
         rel = t - self._t0
         if rel < 0:
             return
-        key = int(rel / PROFILE_RESOLUTION)
-        self._buckets[key] = (rel, weight, flow)
-        self._last_key = max(self._last_key, key)
+        self._put((rel, weight, flow))
+        self._clock.plain(rel)
+        self._finalize(self._clock.finalized)
+        self._final_rel = max(self._final_rel, rel)
+        self._burst_at = len(self._samples)
+        self._weight_seen(weight)
+
+    def _weight_seen(self, weight: float) -> None:
         self._last_weight = weight
         if self.state == TAIL:
             self._tail_max = (
                 weight if self._tail_max is None else max(self._tail_max, weight)
             )
+
+    def _record_frame(
+        self,
+        t: float,
+        weight: float,
+        flow: float,
+        timer: int | None,
+        mono: float,
+    ) -> None:
+        """A sensor frame: at its scale time if it came in a backlog
+        (``BacklogClock``, on the monotonic clock ``mono``), else at its
+        arrival ``t``."""
+        rel = t - self._t0
+        if rel < 0:
+            return
+        clock = self._clock
+        count = None if timer is None else timer - self._base
+        frames = [*clock.pending]  # placed again with the new frame
+        final = clock.add(mono, rel, weight, flow, count)
+        frame = clock.pending[-1]
+        frames.append(frame)
+        old = self._samples[self._burst_at :]
+        new = []
+        floor = self._final_rel
+        for f in frames:
+            floor = max(floor, f.placed_rel)  # brew clock order kept
+            new.append((floor, f.weight, f.flow))
+        self._weight_seen(weight)
+        # For the cut rule: never earlier than what it got before.
+        provisional = frame.rel - (frame.arrival - clock.provisional(frame))
+        self.last_placed = max(self._data_floor, self._t0 + provisional)
+        self.last_lateness = clock.lateness(mono, count)
+        if old == new[: len(old)]:
+            self._put(new[-1])  # the earlier pending frames stay where they are
+            if int(new[-1][0] / PROFILE_RESOLUTION) < self._last_key:
+                self._mark_revised(int(new[-1][0] / PROFILE_RESOLUTION))
+        else:
+            # Re-placed: rebuild the buckets from the lowest one touched.
+            del self._samples[self._burst_at :]
+            self._samples.extend(new)
+            lowest = min(p[0] for p in (*old, *new))
+            self._rebucket(int(lowest / PROFILE_RESOLUTION))
+        if final:
+            self._final_rel = max(self._final_rel, new[final - 1][0])
+            self._finalize(clock.finalized)
+        self._burst_at += final
+
+    def _finalize(self, frames: list[_Frame]) -> None:
+        """Frames placed for good: backlog ones into ``backlog_spans``."""
+        for f in frames:
+            if f.backlog:
+                self._note_backlog(self._t0 + f.placed_rel)
+
+    def _note_backlog(self, t: float) -> None:
+        spans = self.backlog_spans
+        for i, (lo, hi) in enumerate(spans):
+            if lo - 1.0 <= t <= hi + 1.0:
+                spans[i] = (min(lo, t), max(hi, t))
+                return
+        spans.append((t, t))
+
+    def _mark_revised(self, key: int) -> None:
+        if self._revised is None or key < self._revised:
+            self._revised = key
+
+    def _rebucket(self, key: int) -> None:
+        """Rebuild the buckets from ``key`` on out of the samples."""
+        if key < self._last_key:
+            self._mark_revised(key)
+        for k in [k for k in self._buckets if k >= key]:
+            del self._buckets[k]
+        for point in self._samples:
+            k = int(point[0] / PROFILE_RESOLUTION)
+            if k >= key:
+                self._buckets[k] = point
+        self._last_key = max(self._buckets, default=-1)
+
+    def data_time(self, t: float) -> float:
+        """Time of the newest frame (arrival ``t``) for the cut rule, the
+        flow and the pump throttle: a late frame of a running brew in its
+        timer second (as far as known when it came), else ``t``; within a
+        brew never earlier than the time given before (they need a clock
+        that does not go back). Outside a brew simply ``t``."""
+        if not self.active:
+            return t  # no brew: the arrival (a wall clock step is not ours)
+        placed = self.last_placed
+        if placed is None or self.last_sample is None or self.last_sample[0] != t:
+            placed = t
+        placed = max(self._data_floor, placed)
+        self._data_floor = placed
+        return placed
+
+    def pop_revision(self) -> int | None:
+        """Lowest bucket changed after newer buckets existed since the last
+        call (backlog frames placed back in time), or None; clears it."""
+        key, self._revised = self._revised, None
+        return key
+
+    def backlog_near(
+        self, brew_start: float | None, start: float, end: float
+    ) -> bool:
+        """A backlog frame of the brew that started at ``brew_start`` (the
+        active one, or the one finished last) was placed within [start,
+        end]. Only frames placed for good count."""
+        spans: list[tuple[float, float]] = []
+        if self.active and self._t0 == brew_start:
+            spans = self.backlog_spans
+        elif self.finished_backlog is not None and self.finished_backlog[0] == brew_start:
+            spans = self.finished_backlog[1]
+        return any(lo <= end and hi >= start for lo, hi in spans)
 
     def _discard(self, code: str, reason: str) -> None:
         self.last_discard_code = code
@@ -815,6 +1414,10 @@ class BrewTracker:
                 base=self._base,
             )
         self.state = IDLE
+        # A continued brew (same start) keeps its scale clock.
+        self._last_clock = (self._t0, self._base, self._clock)
+        self._finalize(self._clock.pending)
+        self.finished_backlog = (self._t0, list(self.backlog_spans))
         self._reset_brew()
         self.plateau.suppress()
         return result
@@ -941,10 +1544,12 @@ class BrewTracker:
         self._reopened = bool(data.get("reopened"))
         self._resumable = bool(data.get("resumable", True))
         for point in points:
-            key = int(point[0] / PROFILE_RESOLUTION)
-            self._buckets[key] = point
-            self._last_key = max(self._last_key, key)
+            self._put(point)
             self._last_weight = point[1]
+        self._burst_at = len(self._samples)
+        if points:
+            self._clock.plain(points[-1][0])
+            self._final_rel = points[-1][0]
         if state == TAIL:
             self.state = TAIL
             self._stop_t = stop_t
@@ -1021,6 +1626,12 @@ def _derive_flow(
 FIRST_DROP_GRAMS = 1.5
 FIRST_DROP_SUSTAIN = 1.0  # s
 FIRST_DROP_BASELINE = 1.0  # s
+# Live detector only: a baseline above FIRST_DROP_GRAMS but at most this,
+# rising by at least LATE_START_RISE within the baseline second, is coffee
+# already in the cup (the scale timer started after the first drop), not
+# an untared cup.
+LATE_START_MAX_GRAMS = 20.0
+LATE_START_RISE = 0.5
 FLOW_START_DELTA = 1.0  # g, the card's FLOW_START_DELTA
 METRICS_FLOW_WINDOW = 3.0  # s, the card's default flow_smoothing
 _METRICS_MIN_POINTS = 3
@@ -1107,6 +1718,77 @@ def first_drop_time(points: list) -> float | None:
     return None
 
 
+class FirstDropDetector:
+    """``first_drop_time`` live, frame by frame (pump throttle, 0.6.0).
+
+    Same rule and constants: the baseline is the median of the frames in
+    the first FIRST_DROP_BASELINE seconds after the first frame (at most 0;
+    above FIRST_DROP_GRAMS the cup was not tared: no first drop at all), the
+    first drop is the first frame at least FIRST_DROP_GRAMS above it from
+    which on every frame stays there until one at or beyond
+    FIRST_DROP_SUSTAIN later. Confirmed only then, i.e. FIRST_DROP_SUSTAIN
+    after the drop. Times are seconds since the brew start.
+    """
+
+    def __init__(self) -> None:
+        """Start empty (one detector per brew)."""
+        self._t0: float | None = None
+        self._early: list[float] = []
+        self._threshold: float | None = None
+        self.untared = False
+        self.late_start = False
+        self._pending: list[tuple[float, float]] = []
+        self._candidate: float | None = None
+        self.time: float | None = None
+
+    @property
+    def tared(self) -> bool:
+        """The baseline is known and the cup was tared (pump profiles use
+        the weight only then, 0.7.0)."""
+        return self._threshold is not None and not self.untared
+
+    def feed(self, t: float, weight: float) -> float | None:
+        """Add a frame; the first drop time once confirmed (then stays)."""
+        if self.time is not None or self.untared:
+            return self.time
+        if self._t0 is None:
+            self._t0 = t
+        if self._threshold is None:
+            if t <= self._t0 + FIRST_DROP_BASELINE:
+                self._early.append(weight)
+                self._pending.append((t, weight))
+                return None
+            baseline = median(self._early)
+            if baseline > FIRST_DROP_GRAMS:
+                # No reference for the first drop. Either the cup was not
+                # tared, or the scale timer started after the first drops
+                # (light weight, already rising in the first second).
+                self.untared = True
+                rise = self._early[-1] - self._early[0]
+                self.late_start = (
+                    baseline <= LATE_START_MAX_GRAMS and rise >= LATE_START_RISE
+                )
+                return None
+            self._threshold = min(0.0, baseline) + FIRST_DROP_GRAMS
+            pending, self._pending = self._pending, []
+            for pt, pw in pending:
+                self._check(pt, pw)
+                if self.time is not None:
+                    return self.time
+        self._check(t, weight)
+        return self.time
+
+    def _check(self, t: float, weight: float) -> None:
+        assert self._threshold is not None
+        if weight < self._threshold:
+            self._candidate = None
+            return
+        if self._candidate is None:
+            self._candidate = t
+        elif t >= self._candidate + FIRST_DROP_SUSTAIN:
+            self.time = round(max(0.0, self._candidate), 1)
+
+
 def brew_metrics(points: list) -> dict[str, float | None] | None:
     """Time to first drop, peak flow, main-phase mean flow and its CV.
 
@@ -1163,3 +1845,4 @@ def correct_dose(brew: dict, dose: float) -> float:
     brew["ratio"] = compute_ratio(dose, brew.get("yield"))
     brew["counted_dose"] = round(max(counted, dose), 1)
     return round(delta, 1)
+

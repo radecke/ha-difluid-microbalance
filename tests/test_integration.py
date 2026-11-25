@@ -15,7 +15,7 @@ import pytest
 
 pytest.importorskip("pytest_homeassistant_custom_component")
 
-from homeassistant.core import HomeAssistant, ServiceCall  # noqa: E402
+from homeassistant.core import HomeAssistant, ServiceCall, callback  # noqa: E402
 from homeassistant.exceptions import ServiceValidationError  # noqa: E402
 from homeassistant.helpers.dispatcher import async_dispatcher_connect  # noqa: E402
 from homeassistant.setup import async_setup_component  # noqa: E402
@@ -352,7 +352,10 @@ async def test_unload_mid_brew_then_late_disconnect_is_inert(
     events: list[dict] = []
     hass.bus.async_listen(EVENT_BREW_COMPLETED, lambda e: events.append(e.data))
     live: list[dict] = []
-    async_dispatcher_connect(hass, SIGNAL_LIVE.format(entry.entry_id), live.append)
+    # A callback: a plain ``list.append`` would run in the executor (racy).
+    async_dispatcher_connect(
+        hass, SIGNAL_LIVE.format(entry.entry_id), callback(lambda msg: live.append(msg))
+    )
     scale = Scale(coord, clock)
     scale.weigh_dose(18.0)
     scale.status(DeviceState.TIMING)
@@ -1614,8 +1617,11 @@ async def test_delete_brew_service(
     events: list = []
     hass.bus.async_listen(EVENT_BREW_COMPLETED, events.append)
     signals: list = []
+    # A callback: a plain lambda would run in the executor (racy).
     async_dispatcher_connect(
-        hass, SIGNAL_BREWS_UPDATED.format(entry.entry_id), lambda: signals.append(1)
+        hass,
+        SIGNAL_BREWS_UPDATED.format(entry.entry_id),
+        callback(lambda: signals.append(1)),
     )
     assert _state(hass, "sensor.microbalance_last_yield") == "36.0"
 

@@ -1,0 +1,160 @@
+{
+ "version": 1,
+ "minor_version": 3,
+ "key": "difluid_scale.stop_learning.ENTRY",
+ "data": {
+  "model": {
+   "tau": 0.5022520056392453,
+   "c": 0.6327966752443706,
+   "p": [
+    [
+     0.03699821276699051,
+     -0.09816204907739859
+    ],
+    [
+     -0.09816204907739859,
+     0.45873404850936167
+    ]
+   ],
+   "count": 8
+  },
+  "journal": {
+   "base": {
+    "tau": 1.0,
+    "c": 0.3,
+    "p": [
+     [
+      1.0,
+      0.0
+     ],
+     [
+      0.0,
+      1.0
+     ]
+    ],
+    "count": 0
+   },
+   "entries": [
+    {
+     "brew_id": "01JTESTBREW0000000000000001",
+     "start": "2026-07-22T02:10:23.607230+00:00",
+     "flow": 3.369663123761487,
+     "overshoot": 1.594750495406228,
+     "t": "2026-07-23T14:31:09.231418+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000002",
+     "start": "2026-07-22T03:12:59.597122+00:00",
+     "flow": 3.194444444444435,
+     "overshoot": 2.0980555555555536,
+     "t": "2026-07-23T14:31:12.027387+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000003",
+     "start": "2026-07-22T05:05:42.318011+00:00",
+     "flow": 3.0701754385964897,
+     "overshoot": 1.6995614035087718,
+     "t": "2026-07-23T14:31:13.523611+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000004",
+     "start": "2026-07-22T08:43:34.128647+00:00",
+     "flow": 3.333333333333331,
+     "overshoot": 1.8333333333333346,
+     "t": "2026-07-23T14:31:15.002794+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000005",
+     "start": "2026-07-23T01:33:26.441972+00:00",
+     "flow": 3.1707317073170738,
+     "overshoot": 2.2346341463414636,
+     "t": "2026-07-23T14:31:16.420805+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000006",
+     "start": "2026-07-23T02:41:04.260939+00:00",
+     "flow": 3.571428571428557,
+     "overshoot": 2.3571428571428577,
+     "t": "2026-07-23T14:31:17.731074+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000007",
+     "start": "2026-07-23T05:11:21.850844+00:00",
+     "flow": 2.3232323232323226,
+     "overshoot": 2.24868686868687,
+     "t": "2026-07-23T14:31:19.078106+00:00"
+    },
+    {
+     "brew_id": "01JTESTBREW0000000000000008",
+     "start": "2026-07-23T07:28:00.856007+00:00",
+     "flow": 3.0864197530864246,
+     "overshoot": 2.403703703703707,
+     "t": "2026-07-23T14:31:20.278972+00:00"
+    }
+   ]
+  },
+  "last": {
+   "target": 40.0,
+   "target_source": "yield",
+   "dose": null,
+   "cut_weight": 36.6,
+   "cut_flow": 5.18,
+   "predicted_overshoot": 3.23,
+   "lead": 0.147,
+   "final_yield": 37.9,
+   "overshoot": 1.3,
+   "deviation": -2.1,
+   "accepted": true,
+   "reason": null,
+   "clean_cut": true,
+   "bean": "Test bean",
+   "switch_latency": 0.125,
+   "nominal_switch_latency": 0.131,
+   "adjusted_overshoot": 1.33
+  },
+  "settings": {
+   "target_ratio": 2.7,
+   "target_yield": 40.0,
+   "bean_id": null
+  },
+  "switch_latency": {
+   "entity_id": "switch.coffee_machine",
+   "values": [
+    0.13,
+    0.132,
+    0.141,
+    0.129,
+    0.125
+   ],
+   "unknown_streak": 0,
+   "last": 0.125
+  },
+  "throttle": {
+   "settings": {
+    "mode": "throttle",
+    "learning": true,
+    "target_time": 28.0,
+    "floor": 45.0
+   },
+   "model": {
+    "gamma": 1.0,
+    "p": 4.0,
+    "count": 0
+   },
+   "journal": {
+    "base": {
+     "gamma": 1.0,
+     "p": 4.0,
+     "count": 0
+    },
+    "entries": []
+   },
+   "last": null,
+   "last_relay_off": 1763884800.0,
+   "exponent": [],
+   "exponent_throttled": [],
+   "exponent_recent": []
+  },
+  "throttled_deviations": []
+ }
+}

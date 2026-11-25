@@ -251,18 +251,18 @@ function makeCard(config = {}) {
     metrics: { first_drop: 8.8, peak_flow: 3.3, mean_flow: 2.8, flow_cv: 0.19 },
   };
   assert.equal(
-    card._detailText(brew),
+    card._detailHtml(brew),
     "Kenya Kiambu · first drop 8.8 s · peak flow 3.3 g/s · Ø 2.8 g/s ±19 %"
   );
   assert.equal(
-    card._detailText({ metrics: { first_drop: 12.3, peak_flow: null, mean_flow: 2.6, flow_cv: null } }),
+    card._detailHtml({ metrics: { first_drop: 12.3, peak_flow: null, mean_flow: 2.6, flow_cv: null } }),
     "first drop 12.3 s · Ø 2.6 g/s"
   );
-  assert.equal(card._detailText({ bean: null }), "");
-  assert.equal(card._detailText({}), "");
+  assert.equal(card._detailHtml({ bean: null }), "");
+  assert.equal(card._detailHtml({}), "");
   card._hass = { language: "de" };
   assert.equal(
-    card._detailText(brew),
+    card._detailHtml(brew),
     "Kenya Kiambu · erster Tropfen 8,8 s · Spitzenfluss 3,3 g/s · Ø 2,8 g/s ±19 %"
   );
   // The line keeps its space in the live view (visibility, not display):

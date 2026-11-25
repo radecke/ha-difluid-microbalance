@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import DifluidConfigEntry, DifluidCoordinator
-from .entity import DifluidEntity, _device_info
+from .entity import DifluidEntity, DifluidThrottleEntity, _device_info
 from .protocol import (
     CMD_SETTINGS_AUTO_DETECT_TIMING,
     CMD_SETTINGS_AUTO_STOP_TIMING,
@@ -48,6 +48,12 @@ BREW_READY = SwitchEntityDescription(
     translation_key="brew_ready",
 )
 
+THROTTLE_LEARNING = SwitchEntityDescription(
+    key="throttle_learning",
+    translation_key="throttle_learning",
+    entity_category=EntityCategory.CONFIG,
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -60,6 +66,7 @@ async def async_setup_entry(
         [
             *(DifluidSettingSwitch(coordinator, desc, cmd) for desc, cmd in SWITCHES),
             DifluidBrewReadySwitch(coordinator, BREW_READY),
+            DifluidThrottleLearningSwitch(coordinator, THROTTLE_LEARNING),
         ]
     )
 
@@ -133,3 +140,21 @@ class DifluidBrewReadySwitch(SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disarm."""
         self.coordinator.async_set_brew_ready(False)
+
+
+class DifluidThrottleLearningSwitch(DifluidThrottleEntity, SwitchEntity):
+    """Pump throttle: learn the power model from throttled shots (default
+    off; integration state, kept in the store)."""
+
+    @property
+    def is_on(self) -> bool:
+        """Learning on."""
+        return self.coordinator.autostop.throttle.learning
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Learn from the next throttled shots."""
+        self.coordinator.autostop.throttle.set_learning(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Stop learning (the model stays)."""
+        self.coordinator.autostop.throttle.set_learning(False)

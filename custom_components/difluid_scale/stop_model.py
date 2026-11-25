@@ -25,6 +25,7 @@ be driven with synthetic streams in tests.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 import math
 from typing import Any
@@ -90,6 +91,9 @@ INTERVAL_MIN, INTERVAL_MAX = 0.1, 1.0  # s
 # every frame); it only lags a changing flow by ~1 s, which the learned
 # tau absorbs.
 FLOW_WINDOW = 2.0  # s
+# At most this many frames in the flow window (the scale sends ~10 per s): a
+# clock that stands still must not make the pairwise slopes grow without end.
+FLOW_MAX_FRAMES = 40
 
 # Settled yield: the weight varied by at most SETTLE_SPREAD over the last
 # SETTLE_SECONDS (drip below ~0.1 g/s). Given up SETTLE_TIMEOUT after the cut.
@@ -260,6 +264,7 @@ class StopModel:
             or any(len(row) != 2 for row in p)
             or not all(math.isfinite(v) for v in (tau, c, *p[0], *p[1]))
             or count < 0
+            or not _covariance_ok(p)
         ):
             return None
         model.tau = _clamp(tau, TAU_MIN, TAU_MAX)
@@ -273,40 +278,77 @@ class StopModel:
         return StopModel.from_dict(self.to_dict())
 
 
+def _covariance_ok(p: list[list[float]]) -> bool:
+    """A stored 2x2 covariance is usable: symmetric (within rounding) and
+    positive definite. A negative or indefinite one (damaged store) would
+    make the next update divide by ~0 or blow P up (audit B7)."""
+    a, b = p[0]
+    c, d = p[1]
+    if abs(b - c) > 1e-6 * max(1.0, abs(b), abs(c)):
+        return False
+    return a > 0 and d > 0 and a * d - b * c > 0
+
+
 # Accepted learning samples kept for un-learning (older ones are folded
 # into the journal's base).
 JOURNAL_MAX = 50
+
+# Sample fields of the stop model's journal entries (StopModel.update).
+STOP_FIELDS = ("flow", "overshoot")
+
+
+def _stop_update(model: Any, entry: dict[str, Any]) -> bool:
+    """Feed one stop journal entry into a StopModel."""
+    return model.update(entry["flow"], entry["overshoot"])
+
+
+def _scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (bool, int, float, str))
 
 
 class LearningJournal:
     """Every accepted learning sample, so one can be taken out again.
 
-    ``entries`` (oldest first) hold exactly what was fed into
-    ``StopModel.update``: the regressor ``flow`` and the ``overshoot``
-    (latency-adjusted where the cut had a measured switch latency), plus
+    Generic over the learned model (0.6.0): ``factory`` makes the prior
+    model and parses a stored one (``factory()``, ``factory.parse``; the
+    model has ``copy`` and ``to_dict``), ``update(model, entry)`` feeds one
+    entry into a model, ``fields`` names the entry's numeric sample fields.
+    The defaults are the stop model (``StopModel``, flow/overshoot); the
+    pump throttle model uses the same journal (``throttle_model``).
+
+    ``entries`` (oldest first) hold exactly what was fed into the model's
+    update (stop model: the regressor ``flow`` and the ``overshoot``,
+    latency-adjusted where the cut had a measured switch latency), plus
     ``brew_id`` / ``start`` (ISO, as stored with the brew) of the brew and
-    the time ``t`` it was learned. ``base`` is the model before the first
-    entry: the prior for a fresh model, the stored model for one learned
-    before the journal existed (0.5.1), so nothing learned earlier is
-    lost by a replay.
+    the time ``t`` it was learned; other plain keys (e.g. ``throttled``)
+    are kept as they are. ``base`` is the model before the first entry: the
+    prior for a fresh model, the stored model for one learned before the
+    journal existed (0.5.1), so nothing learned earlier is lost by a replay.
 
     ``replay()`` starts from ``base`` and feeds the entries in order through
-    the same ``update``; with an unchanged journal it reproduces the
+    the same update; with an unchanged journal it reproduces the
     incrementally learned model exactly (same operations on the same
     floats). Beyond ``JOURNAL_MAX`` entries the oldest is dropped from the
-    journal and folded into ``base`` (``base.update`` with it): the model
-    stays identical, but that sample can no longer be taken out. Its weight
-    in the current model is at most FORGETTING ** JOURNAL_MAX (0.93 ** 50 ~
+    journal and folded into ``base`` (update with it): the model stays
+    identical, but that sample can no longer be taken out. Its weight in
+    the current model is at most FORGETTING ** JOURNAL_MAX (0.93 ** 50 ~
     2.6 %), so not being able to remove it is negligible.
     """
 
     def __init__(
         self,
-        base: StopModel | None = None,
+        base: Any | None = None,
         entries: list[dict[str, Any]] | None = None,
+        *,
+        factory: Any = None,
+        update: Callable[[Any, dict[str, Any]], bool] | None = None,
+        fields: tuple[str, ...] = STOP_FIELDS,
     ) -> None:
-        """Start on ``base`` (default: the prior) with ``entries``."""
-        self.base = base.copy() if base is not None else StopModel()
+        """Start on ``base`` (default: the factory's prior) with ``entries``."""
+        self.factory = factory if factory is not None else StopModel
+        self.update = update if update is not None else _stop_update
+        self.fields = fields
+        self.base = base.copy() if base is not None else self.factory()
         self.entries: list[dict[str, Any]] = []
         for entry in entries or ():
             self.add(entry)
@@ -315,6 +357,12 @@ class LearningJournal:
         """Number of entries (samples that can still be taken out)."""
         return len(self.entries)
 
+    def empty_like(self, base: Any | None = None) -> LearningJournal:
+        """An empty journal of the same kind on ``base`` (default: prior)."""
+        return LearningJournal(
+            base, factory=self.factory, update=self.update, fields=self.fields
+        )
+
     @staticmethod
     def entry(
         flow: float,
@@ -322,22 +370,34 @@ class LearningJournal:
         brew_id: str | None = None,
         start: str | None = None,
         t: str | None = None,
+        throttled: bool = False,
     ) -> dict[str, Any]:
-        """One journal entry (plain data for the store)."""
-        return {
-            "brew_id": brew_id,
-            "start": start,
-            "flow": flow,
-            "overshoot": overshoot,
-            "t": t,
-        }
+        """One stop journal entry (plain data for the store). ``throttled``
+        (0.6.0): the brew was slowed down by the pump throttle (marked only
+        when true, so older entries stay as they were)."""
+        entry = LearningJournal.make(
+            {"flow": flow, "overshoot": overshoot}, brew_id, start, t
+        )
+        if throttled:
+            entry["throttled"] = True
+        return entry
+
+    @staticmethod
+    def make(
+        values: dict[str, float],
+        brew_id: str | None = None,
+        start: str | None = None,
+        t: str | None = None,
+    ) -> dict[str, Any]:
+        """One journal entry of any model: ``values`` are its sample fields."""
+        return {"brew_id": brew_id, "start": start, **values, "t": t}
 
     def add(self, entry: dict[str, Any]) -> None:
         """Append an accepted sample; fold the oldest beyond the cap."""
         self.entries.append(entry)
         while len(self.entries) > JOURNAL_MAX:
             old = self.entries.pop(0)
-            self.base.update(old["flow"], old["overshoot"])
+            self.update(self.base, old)
 
     @staticmethod
     def matches(
@@ -374,11 +434,11 @@ class LearningJournal:
         ]
         return before - len(self.entries)
 
-    def replay(self) -> StopModel:
+    def replay(self) -> Any:
         """The model learned from ``base`` and the entries, in order."""
         model = self.base.copy()
         for entry in self.entries:
-            model.update(entry["flow"], entry["overshoot"])
+            self.update(model, entry)
         return model
 
     def to_dict(self) -> dict[str, Any]:
@@ -389,22 +449,40 @@ class LearningJournal:
         }
 
     @classmethod
-    def from_dict(cls, data: Any, model: StopModel) -> LearningJournal:
+    def from_dict(
+        cls,
+        data: Any,
+        model: Any,
+        *,
+        factory: Any = None,
+        update: Callable[[Any, dict[str, Any]], bool] | None = None,
+        fields: tuple[str, ...] = STOP_FIELDS,
+    ) -> LearningJournal:
         """Restore. Missing or invalid data gives an empty journal on
         ``model``: a store from before the journal keeps its model, and
         replaying the empty journal gives that model back."""
-        journal = cls.parse(data)
-        return journal if journal is not None else cls(model)
+        journal = cls.parse(data, factory=factory, update=update, fields=fields)
+        if journal is not None:
+            return journal
+        return cls(model, factory=factory, update=update, fields=fields)
 
     @classmethod
-    def parse(cls, data: Any) -> LearningJournal | None:
+    def parse(
+        cls,
+        data: Any,
+        *,
+        factory: Any = None,
+        update: Callable[[Any, dict[str, Any]], bool] | None = None,
+        fields: tuple[str, ...] = STOP_FIELDS,
+    ) -> LearningJournal | None:
         """Restore; None without a valid ``base``. Entries that are not a
-        dict or whose flow/overshoot is not a finite number are skipped
+        dict or whose sample fields are not finite numbers are skipped
         (the sum base count + entries then no longer equals the model's
         count)."""
         if not isinstance(data, dict):
             return None
-        base = StopModel.parse(data.get("base"))
+        model_cls = factory if factory is not None else StopModel
+        base = model_cls.parse(data.get("base"))
         if base is None:
             return None
         raw_entries = data.get("entries")
@@ -412,26 +490,27 @@ class LearningJournal:
         for raw in raw_entries if isinstance(raw_entries, list) else ():
             if not isinstance(raw, dict):
                 continue
-            flow, overshoot = raw.get("flow"), raw.get("overshoot")
+            values = [raw.get(name) for name in fields]
             if not all(
                 isinstance(v, (int, float)) and not isinstance(v, bool)
-                for v in (flow, overshoot)
+                for v in values
             ):
                 continue
-            flow, overshoot = float(flow), float(overshoot)
-            if not (math.isfinite(flow) and math.isfinite(overshoot)):
+            numbers = [float(v) for v in values]
+            if not all(math.isfinite(v) for v in numbers):
                 continue
             brew_id, start, t = raw.get("brew_id"), raw.get("start"), raw.get("t")
-            entries.append(
-                cls.entry(
-                    flow,
-                    overshoot,
-                    brew_id if isinstance(brew_id, str) else None,
-                    start if isinstance(start, str) else None,
-                    t if isinstance(t, str) else None,
-                )
+            entry = cls.make(
+                dict(zip(fields, numbers)),  # noqa: B905 - plain python3.9 tests
+                brew_id if isinstance(brew_id, str) else None,
+                start if isinstance(start, str) else None,
+                t if isinstance(t, str) else None,
             )
-        return cls(base, entries)
+            for key, value in raw.items():
+                if key not in entry and isinstance(key, str) and _scalar(value):
+                    entry[key] = value
+            entries.append(entry)
+        return cls(base, entries, factory=factory, update=update, fields=fields)
 
 
 class SampleFilter:
@@ -634,15 +713,15 @@ class FlowEstimator:
     def feed(self, t: float, weight: float, shift: bool = False) -> float:
         """Add a sample and return the flow at ``t`` (g/s)."""
         samples = self._samples
-        if samples and t < samples[-1][0]:
-            samples.clear()  # clock went back
+        while samples and t < samples[-1][0]:
+            samples.pop()  # clock went back: only the newer samples go
         if shift and samples:
             last_t, last_w = samples[-1]
             step = weight - (last_w + self._flow * (t - last_t))
             for i, (ts, ws) in enumerate(samples):
                 samples[i] = (ts, ws + step)
         samples.append((t, weight))
-        while samples[0][0] < t - self.window:
+        while samples[0][0] < t - self.window or len(samples) > FLOW_MAX_FRAMES:
             samples.popleft()
         points = list(samples)
         slopes = [
@@ -704,10 +783,11 @@ def profile_cut(
     profile is replayed through the same SampleFilter and FlowEstimator as
     the live cut; the last accepted point at or before ``offset`` is the cut
     sample. Returns (t, weight, flow, clean) or None when no point lies at
-    or before ``offset``; ``clean`` is False when a frame was dropped (or
-    the level changed) within FLOW_WINDOW before the cut, the point at the
+    or before ``offset``; ``clean`` is False when the level changed (cup
+    touched or lifted) within FLOW_WINDOW before the cut, the point at the
     cut itself was held back, or the window held fewer than FLOW_MIN_FRAMES
-    frames (gap). A stored profile keeps one point per 0.25 s, so a bad
+    frames (gap); a single dropped frame does not (it is left out of the
+    flow, as live). A stored profile keeps one point per 0.25 s, so a bad
     frame overwritten in its bucket is not seen here: live and service can
     differ in ``clean`` (the flow itself is clean then).
     """
@@ -772,14 +852,27 @@ class Cut:
     dose: float | None = None  # dose the ratio was applied to
     lead: float = 0.0  # s looked ahead (half the sample interval)
     bean: str | None = None  # active bean profile at the cut (analysis only)
-    # No frame dropped and no level change within FLOW_WINDOW before the cut
-    # (else the shot is not learned: the flow may be distorted).
+    # No level change (cup touched or lifted) within FLOW_WINDOW before the
+    # cut, at least FLOW_MIN_FRAMES frames in the flow window, and not a late
+    # cut (else the shot is not learned: the flow may be distorted). A single
+    # dropped frame is simply left out of the flow and keeps the cut clean.
     clean: bool = True
-    # Nominal switch latency (s) when the cut was made (used to correct
-    # this cut's learning sample) and the measured one (None: not measured
-    # yet, timed out, switch already off/unavailable, or the call failed).
+    # Cut only after the weight was already past the cut point (a gap in the
+    # scale data, e.g. a BLE drop, audit B1): never learned.
+    late: bool = False
+    # Nominal switch latency (s) the learning sample is corrected to: the
+    # switch's nominal once this cut's measurement ended (the same rule as
+    # ``learn_stop_from_brew``: the nominal at the time the sample is
+    # learned), and the measured one (None: not measured yet, timed out,
+    # switch already off/unavailable, or the call failed).
     nominal_latency: float = SWITCH_LATENCY_DEFAULT
     switch_latency: float | None = None
     # True until the measurement ended (learning waits for it, at most
     # SWITCH_LATENCY_TIMEOUT after the call).
     latency_pending: bool = False
+    # The pump throttle changed the pump power in this brew (0.6.0): the
+    # learning sample is marked ``throttled`` in the journal.
+    throttled: bool = False
+    # The scale data around the cut came in a backlog (held back by a
+    # stalled event loop or BLE stack, 0.7.0b6): never learned.
+    delayed: bool = False

@@ -20,7 +20,7 @@ pytest.importorskip("pytest_homeassistant_custom_component")
 from conftest import ADDR
 from homeassistant.config_entries import ConfigEntryDisabler
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import CoreState, HomeAssistant, ServiceCall, State
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, State, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
@@ -411,7 +411,9 @@ async def test_live_stores_load_migrate_and_take_over_targets(
     async_fire_time_changed(hass, fire_all=True)
     await hass.async_block_till_done()
     stored = hass_storage[stop_key]
-    assert stored["minor_version"] == 2
+    # 0.6.0: stop store 1.3 (``throttle`` added at its defaults).
+    assert stored["minor_version"] == 4
+    assert stored["data"]["throttle"]["settings"]["mode"] == "observe"
     assert stored["data"]["settings"] == {
         "target_ratio": 2.6, "target_yield": 40.0, "bean_id": None,
     }
@@ -488,7 +490,11 @@ async def test_store_migrate_funcs() -> None:
     with pytest.raises(NotImplementedError):
         await BrewStore._async_migrate_func(None, 2, 1, brews)
     stop = LIVE["stop_store"]["data"]
-    assert await StopStore._async_migrate_func(None, 1, 1, stop) == stop
+    # 0.6.0: up to 1.2 the stop part stays as it was, ``throttle`` is added.
+    migrated_stop = await StopStore._async_migrate_func(None, 1, 1, stop)
+    assert {k: v for k, v in migrated_stop.items() if k != "throttle"} == stop
+    assert migrated_stop["throttle"]["model"]["gamma"] == 1.0
+    assert migrated_stop["throttle"]["model"]["count"] == 0
     with pytest.raises(NotImplementedError):
         await StopStore._async_migrate_func(None, 2, 1, stop)
 
@@ -570,14 +576,12 @@ async def test_repair_issue_for_missing_or_unavailable_stop_switch(
     hass.states.async_set(PLUG, "off", PLUG_ATTRS)
     await hass.async_block_till_done()
     assert _issue(hass, entry) is None
-    # Really unavailable later (state listener): raised, cleared when back.
+    # Going unavailable later (e.g. a relay powered off with the machine):
+    # the state listener never reports it ...
     hass.states.async_set(PLUG, "unavailable", PLUG_ATTRS)
     await hass.async_block_till_done()
-    assert _issue(hass, entry) is not None
-    hass.states.async_set(PLUG, "on", PLUG_ATTRS)
-    await hass.async_block_till_done()
     assert _issue(hass, entry) is None
-    # A registry placeholder (integration not loaded) is ignored here ...
+    # ... nor a registry placeholder (integration not loaded) ...
     hass.states.async_set(PLUG, "unavailable", {**PLUG_ATTRS, "restored": True})
     await hass.async_block_till_done()
     assert _issue(hass, entry) is None
@@ -613,7 +617,13 @@ async def test_repair_issue_for_missing_or_unavailable_stop_switch(
     )
     await hass.async_block_till_done()
     assert _issue(hass, entry).translation_placeholders["entity_id"] == "switch.nope"
-    assert await hass.config_entries.async_unload(entry.entry_id)
+    # A reload keeps it; disabling the entry clears it.
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert _issue(hass, entry) is not None
+    assert await hass.config_entries.async_set_disabled_by(
+        entry.entry_id, ConfigEntryDisabler.USER
+    )
     await hass.async_block_till_done()
     assert _issue(hass, entry) is None
 
@@ -1060,7 +1070,7 @@ async def test_bean_fixed_at_brew_start(
     original = coord.autostop.feed_sample
     switched = False
 
-    def _feed(t: float, weight: float) -> None:
+    def _feed(t: float, weight: float, placed: float | None = None) -> None:
         nonlocal switched
         if not switched and coord.brew_tracker.state == BREWING and weight > 10:
             switched = True
@@ -1106,14 +1116,26 @@ async def test_guarded_logs_stack_trace_throttled(
 async def test_runtime_issue_survives_option_save_and_reload(
     hass: HomeAssistant, entry, no_ble, lovelace, clock
 ) -> None:
-    """A really unavailable switch stays reported through option saves
-    (also the ratio write-back) and a reload while HA runs; a placeholder
+    """An unavailable switch is not reported at setup, option saves or a
+    reload while HA runs (it may be powered off with the machine); only a
+    cut that cannot switch it off reports it. That issue stays through
+    option saves (also the ratio write-back) and a reload; a placeholder
     state does not clear it; only a usable switch does."""
     hass.states.async_set(PLUG, "unavailable", PLUG_ATTRS)
     hass.config_entries.async_update_entry(
         entry, options={**OPTIONS, "stop_switch": PLUG}
     )
-    await _setup(hass, entry)  # HA running: really unavailable counts
+    await _setup(hass, entry)  # HA running, machine off: not reported
+    assert _issue(hass, entry) is None
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert _issue(hass, entry) is None
+    # The cut cannot switch it off: reported.
+    async_mock_service(hass, "switch", "turn_off")
+    coord = entry.runtime_data
+    cut = Cut(start=0.0, t=0.0, weight=35.0, flow=2.0, target=38.0, predicted=2.0)
+    await coord.autostop._async_switch_off(PLUG, cut)
+    await hass.async_block_till_done()
     assert _issue(hass, entry) is not None
     await _add_bean(hass, entry, "Kenya", 2.0)
     await hass.async_block_till_done()
@@ -1140,6 +1162,22 @@ async def test_runtime_issue_survives_option_save_and_reload(
     await hass.async_block_till_done()
     assert _issue(hass, entry) is not None  # placeholder: not cleared
     hass.states.async_set(PLUG, "on", PLUG_ATTRS)
+    await hass.async_block_till_done()
+    assert _issue(hass, entry) is None  # available again: cleared
+    # Going unavailable again afterwards (machine off): not raised again.
+    hass.states.async_set(PLUG, "unavailable", PLUG_ATTRS)
+    await hass.async_block_till_done()
+    assert _issue(hass, entry) is None
+    # Raised by a cut again, then another (also unavailable) switch chosen:
+    # the issue naming the old one is dropped, none raised for the new one.
+    await entry.runtime_data.autostop._async_switch_off(PLUG, cut)
+    await hass.async_block_till_done()
+    assert _issue(hass, entry) is not None
+    hass.states.async_set("switch.other", "unavailable", PLUG_ATTRS)
+    result = await _options_step(hass, entry, "detection")
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {**OPTIONS, "stop_switch": "switch.other"}
+    )
     await hass.async_block_till_done()
     assert _issue(hass, entry) is None
 
@@ -1204,6 +1242,7 @@ async def test_add_bean_service(
         assert resp == {
             "bean_id": entry.options["beans"][0]["id"], "name": "Kenya Kiambu",
             "ratio": 2.4, "active": True,
+            "ratios": {"standard": 2.4},  # 0.7.0b6: per pump profile
         }
         assert entry.options["beans"][0]["note"] == "x"
         # With ratio, not activated: the active bean and the target stay.
@@ -1447,7 +1486,9 @@ async def test_add_bean_persists_across_restart(
     # config entry store itself is HA's job and not mocked here).
     stored = entry.as_dict()
     assert stored["options"]["beans"] == [
-        {"id": resp["bean_id"], "name": "Kenya", "ratio": 2.2, "note": None}
+        # 0.7.0b6: the ratio per pump profile too (Standard is active).
+        {"id": resp["bean_id"], "name": "Kenya", "ratio": 2.2, "note": None,
+         "ratios": {"standard": 2.2}, "ratio_written": 2.2}
     ]
     settings = hass_storage[STOP_STORAGE_KEY.format(entry.entry_id)]["data"]["settings"]
     assert settings == {
@@ -1569,8 +1610,9 @@ async def test_restart_without_changes_keeps_a_manual_ratio(
 async def test_active_bean_deleted_during_brew(
     hass: HomeAssistant, entry, no_ble, lovelace, clock
 ) -> None:
-    """Like selecting another bean mid-brew: the target ratio switches at
-    once (the cut uses it), the brew keeps the bean of its start."""
+    """Like selecting another bean mid-brew: since 0.7.0b6 the running brew
+    keeps its target (the cut uses the old ratio), the new bean's ratio
+    applies once the brew has ended; the brew keeps the bean of its start."""
     calls = await _setup_autostop(hass, entry, PLUG, 0.0)
     await _bean_service(hass, "add_bean", name="Kenya", ratio=2.4)
     await _bean_service(hass, "add_bean", name="Guji", ratio=2.0, activate=False)
@@ -1580,7 +1622,7 @@ async def test_active_bean_deleted_during_brew(
     original = coord.autostop.feed_sample
     deleted = False
 
-    def _feed(t: float, weight: float) -> None:
+    def _feed(t: float, weight: float, placed: float | None = None) -> None:
         nonlocal deleted
         if not deleted and coord.brew_tracker.state == BREWING and weight > 5:
             deleted = True
@@ -1594,9 +1636,9 @@ async def test_active_bean_deleted_during_brew(
     with patch.object(coord.autostop, "feed_sample", _feed):
         assert await _auto_shot(hass, scale, dose=18.0) is not None
     assert deleted and coord.autostop.active_bean_name == "Guji"
-    assert coord.autostop.ratio == 2.0
+    assert coord.autostop.ratio == 2.0  # after the brew
     cut = events[0].attributes
-    assert cut["target"] == 36.0  # 2.0 x 18 g: the new bean's ratio
+    assert cut["target"] == 43.2  # 2.4 x 18 g: the ratio the brew started with
     assert cut["bean"] == "Kenya"  # fixed at the brew start
     assert coord.brews.last["bean"] == "Kenya"
 
@@ -1610,7 +1652,10 @@ async def test_live_and_ready_messages_carry_the_target(
     calls = await _setup_autostop(hass, entry, PLUG, 38.0)
     coord = entry.runtime_data
     live: list[dict] = []
-    async_dispatcher_connect(hass, SIGNAL_LIVE.format(entry.entry_id), live.append)
+    # A callback: a plain ``list.append`` would run in the executor (racy).
+    async_dispatcher_connect(
+        hass, SIGNAL_LIVE.format(entry.entry_id), callback(lambda msg: live.append(msg))
+    )
     # Ready without a dose: the fixed target yield.
     coord.async_set_brew_ready(True)
     assert live[-1]["target"] == 38.0 and live[-1]["target_source"] == "yield"
@@ -1816,7 +1861,10 @@ async def test_live_time_freezes_at_the_cut(
     calls = await _setup_autostop(hass, entry, PLUG, 38.0)
     coord = entry.runtime_data
     live: list[dict] = []
-    async_dispatcher_connect(hass, SIGNAL_LIVE.format(entry.entry_id), live.append)
+    # A callback: a plain ``list.append`` would run in the executor (racy).
+    async_dispatcher_connect(
+        hass, SIGNAL_LIVE.format(entry.entry_id), callback(lambda msg: live.append(msg))
+    )
     scale = Scale(coord, clock)
     scale.calls = calls
     cut_t = await _auto_shot(hass, scale, seconds=50)

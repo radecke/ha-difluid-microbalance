@@ -10,13 +10,20 @@
       },
       "bluetooth_confirm": {
         "description": "Möchtest du {name} einrichten?"
+      },
+      "reconfigure": {
+        "description": "Waage wählen, die dieser Eintrag ab jetzt nutzt (z. B. ein Ersatzgerät). Bezugsverlauf, gelernte Modelle, Bohnen- und Pumpenprofile, Einstellungen und Entitäts-IDs bleiben erhalten.",
+        "data": {
+          "address": "Gerät"
+        }
       }
     },
     "abort": {
       "already_configured": "Gerät ist bereits eingerichtet",
       "already_in_progress": "Einrichtung läuft bereits",
       "no_devices_found": "Keine Waage im Netzwerk gefunden. Waage einschalten und erneut versuchen.",
-      "not_supported": "Gerät nicht unterstützt"
+      "not_supported": "Gerät nicht unterstützt",
+      "reconfigure_successful": "Die Neukonfiguration war erfolgreich"
     }
   },
   "entity": {
@@ -135,7 +142,8 @@
               "brew_discarded": "Bezug verworfen",
               "brew_truncated": "Bezug abgebrochen",
               "cup_lifted": "Tasse vor dem Nachtropfen abgenommen",
-              "switch_latency_unknown": "Schaltlatenz des Stopp-Schalters unbekannt"
+              "switch_latency_unknown": "Schaltlatenz des Stopp-Schalters unbekannt",
+              "delayed_data": "Verspätete Waagendaten"
             }
           },
           "target_source": {
@@ -159,6 +167,120 @@
           },
           "adjusted_overshoot": {
             "name": "Korrigierter Nachlauf"
+          },
+          "throttled": {
+            "name": "Pumpe gedrosselt"
+          },
+          "throttled_deviation_mean": {
+            "name": "Mittlere Abweichung gedrosselter Bezüge"
+          },
+          "throttled_deviation_count": {
+            "name": "Gezählte gedrosselte Bezüge"
+          }
+        }
+      },
+      "predicted_shot_time": {
+        "name": "Vorhergesagte Bezugszeit",
+        "state_attributes": {
+          "mode": {
+            "name": "Betriebsart",
+            "state": {
+              "off": "Aus",
+              "observe": "Beobachten",
+              "throttle": "Drosseln"
+            }
+          },
+          "pump_configured": {
+            "name": "Pumpenleistung eingerichtet"
+          },
+          "stop_switch_configured": {
+            "name": "Stopp-Schalter eingerichtet"
+          },
+          "target_shot_time": {
+            "name": "Ziel-Bezugszeit"
+          },
+          "last_reason": {
+            "name": "Letzter Bezug nicht gedrosselt, weil",
+            "state": {
+              "no_target": "Kein Auto-Stopp-Ziel",
+              "no_relay_start": "Nicht über den Stopp-Schalter gestartet",
+              "no_first_drop": "Tasse nicht tariert",
+              "pump_unavailable": "Pumpenleistung nicht verfügbar",
+              "no_pump": "Keine Pumpenleistung eingerichtet",
+              "timer_after_first_drop": "Waagen-Timer erst nach dem ersten Tropfen gestartet"
+            }
+          },
+          "prediction_exponent": {
+            "name": "Exponent der Vorhersage"
+          },
+          "prediction_exponent_samples": {
+            "name": "Bezüge im Exponenten"
+          },
+          "prediction_exponent_throttled_samples": {
+            "name": "Bezüge im Exponenten aus gedrosselten Bezügen"
+          }
+        }
+      },
+      "last_pump_power": {
+        "name": "Letzte Pumpenleistung",
+        "state_attributes": {
+          "mode": {
+            "name": "Betriebsart",
+            "state": {
+              "off": "Aus",
+              "observe": "Beobachten",
+              "throttle": "Drosseln"
+            }
+          },
+          "applied": {
+            "name": "An der Pumpe gesetzt"
+          },
+          "triggered": {
+            "name": "Ausgelöst"
+          },
+          "unreachable": {
+            "name": "Zielzeit unerreichbar"
+          },
+          "grind_finer": {
+            "name": "Feiner mahlen"
+          },
+          "target_time": {
+            "name": "Ziel-Bezugszeit"
+          },
+          "predicted_at_trigger": {
+            "name": "Vorhersage beim Auslösen"
+          },
+          "end_shot_time": {
+            "name": "Bezugszeit am Ende"
+          },
+          "would_set": {
+            "name": "Hätte gesetzt"
+          },
+          "would_need_floor": {
+            "name": "Hätte die Untergrenze gebraucht"
+          },
+          "unreachable_reason": {
+            "name": "Unerreichbar, weil",
+            "state": {
+              "floor": "Untergrenze erreicht",
+              "rate_limit": "Korrekturen begrenzt",
+              "late_trigger": "Zu spät ausgelöst",
+              "trigger_cap": "Pumpe nicht gelernt – Lernen einschalten"
+            }
+          }
+        }
+      },
+      "throttle_power_exponent": {
+        "name": "Exponent Pumpenleistung"
+      },
+      "throttle_samples": {
+        "name": "Pumpendrosselung Lernproben",
+        "state_attributes": {
+          "journal_samples": {
+            "name": "Proben im Lernjournal"
+          },
+          "journal_base_samples": {
+            "name": "Ältere Proben"
           }
         }
       }
@@ -183,6 +305,9 @@
       },
       "reset_stop_learning": {
         "name": "Stopp-Lernen zurücksetzen"
+      },
+      "reset_throttle_learning": {
+        "name": "Pumpendrosselung Lernen zurücksetzen"
       }
     },
     "event": {
@@ -217,7 +342,9 @@
               "brew_discarded": "Bezug verworfen",
               "brew_truncated": "Bezug abgebrochen",
               "cup_lifted": "Tasse vor dem Nachtropfen abgenommen",
-              "switch_latency_unknown": "Schaltlatenz des Stopp-Schalters unbekannt"
+              "switch_latency_unknown": "Schaltlatenz des Stopp-Schalters unbekannt",
+              "delayed_data": "Verspätete Waagendaten",
+              "cut_failed": "Ausschalten fehlgeschlagen (aufgegeben)"
             }
           },
           "target": {
@@ -253,6 +380,81 @@
           },
           "switch_latency": {
             "name": "Schaltlatenz"
+          },
+          "attempt": {
+            "name": "Versuch"
+          }
+        }
+      },
+      "throttle": {
+        "name": "Pumpendrosselung",
+        "state_attributes": {
+          "event_type": {
+            "name": "Ereignistyp",
+            "state": {
+              "triggered": "Ausgelöst",
+              "corrected": "Leistung geändert",
+              "ended": "Beendet"
+            }
+          },
+          "mode": {
+            "name": "Betriebsart",
+            "state": {
+              "off": "Aus",
+              "observe": "Beobachten",
+              "throttle": "Drosseln"
+            }
+          },
+          "shot_time": {
+            "name": "Bezugszeit"
+          },
+          "target_time": {
+            "name": "Ziel-Bezugszeit"
+          },
+          "predicted_shot_time": {
+            "name": "Vorhergesagte Bezugszeit"
+          },
+          "predicted_at_trigger": {
+            "name": "Vorhersage beim Auslösen"
+          },
+          "power": {
+            "name": "Pumpenleistung"
+          },
+          "applied": {
+            "name": "An der Pumpe gesetzt"
+          },
+          "target_flow": {
+            "name": "Soll-Fluss"
+          },
+          "target_weight": {
+            "name": "Soll-Gewicht jetzt"
+          },
+          "unreachable": {
+            "name": "Zielzeit unerreichbar"
+          },
+          "grind_finer": {
+            "name": "Feiner mahlen"
+          },
+          "bean": {
+            "name": "Bohne"
+          },
+          "end_reason": {
+            "name": "Beendet durch"
+          },
+          "would_set": {
+            "name": "Hätte gesetzt"
+          },
+          "would_need_floor": {
+            "name": "Hätte die Untergrenze gebraucht"
+          },
+          "unreachable_reason": {
+            "name": "Unerreichbar, weil",
+            "state": {
+              "floor": "Untergrenze erreicht",
+              "rate_limit": "Korrekturen begrenzt",
+              "late_trigger": "Zu spät ausgelöst",
+              "trigger_cap": "Pumpe nicht gelernt – Lernen einschalten"
+            }
           }
         }
       }
@@ -266,6 +468,9 @@
       },
       "brew_ready": {
         "name": "Bezug vorbereiten"
+      },
+      "throttle_learning": {
+        "name": "Pumpendrosselung lernen"
       }
     },
     "select": {
@@ -282,6 +487,68 @@
         "state": {
           "none": "Keine"
         }
+      },
+      "throttle_mode": {
+        "name": "Pumpendrosselung",
+        "state": {
+          "off": "Aus",
+          "observe": "Beobachten (Trockenlauf)",
+          "throttle": "Pumpe steuern"
+        }
+      },
+      "pump_profile": {
+        "name": "Pumpenprofil",
+        "state": {
+          "standard": "Standard",
+          "soft_preinfusion": "Sanfte Vorbrühung",
+          "blooming": "Blooming",
+          "allonge": "Allongé",
+          "lever": "Hebel-Annäherung",
+          "target_time": "Zielzeit"
+        },
+        "state_attributes": {
+          "running": {
+            "state": {
+              "standard": "Standard",
+              "soft_preinfusion": "Sanfte Vorbrühung",
+              "blooming": "Blooming",
+              "allonge": "Allongé",
+              "lever": "Hebel-Annäherung",
+              "target_time": "Zielzeit"
+            }
+          },
+          "last_outcome_profile": {
+            "state": {
+              "standard": "Standard",
+              "soft_preinfusion": "Sanfte Vorbrühung",
+              "blooming": "Blooming",
+              "allonge": "Allongé",
+              "lever": "Hebel-Annäherung",
+              "target_time": "Zielzeit"
+            }
+          },
+          "last_brew_profile": {
+            "state": {
+              "standard": "Standard",
+              "soft_preinfusion": "Sanfte Vorbrühung",
+              "blooming": "Blooming",
+              "allonge": "Allongé",
+              "lever": "Hebel-Annäherung",
+              "target_time": "Zielzeit"
+            }
+          },
+          "running_phase": {
+            "state": {
+              "brew": "Bezug",
+              "preinfusion": "Vorbrühung",
+              "fill": "Füllen",
+              "bloom": "Blooming",
+              "flow": "Fluss",
+              "peak": "Spitze",
+              "decline": "Abfall"
+            }
+          }
+        }
       }
     },
     "number": {
@@ -293,6 +560,20 @@
       },
       "target_ratio": {
         "name": "Zielverhältnis"
+      },
+      "target_shot_time": {
+        "name": "Ziel-Bezugszeit",
+        "state_attributes": {
+          "effective": {
+            "name": "Für die aktive Bohne"
+          }
+        }
+      },
+      "throttle_floor": {
+        "name": "Pumpendrosselung Untergrenze"
+      },
+      "standard_pump_power": {
+        "name": "Standard-Pumpenleistung"
       }
     }
   },
@@ -359,6 +640,18 @@
     },
     "bean_required": {
       "message": "Wähle eine der Bohnen; „Keine“ gibt es nur, solange keine Bohnenprofile angelegt sind."
+    },
+    "profile_invalid": {
+      "message": "Ungültiges Pumpenprofil: {error}"
+    },
+    "profile_exists": {
+      "message": "Ein Pumpenprofil „{label}“ gibt es schon. Mit overwrite: true wird es ersetzt."
+    },
+    "profile_builtin": {
+      "message": "„{label}“ ist ein eingebautes Pumpenprofil und kann nicht ersetzt oder gelöscht werden."
+    },
+    "profile_unknown": {
+      "message": "Kein Pumpenprofil „{label}“."
     }
   },
   "options": {
@@ -385,7 +678,8 @@
           "stability_tolerance": "Toleranz für stabile Dosis (±)",
           "stability_seconds": "Dosis mindestens stabil für",
           "dose_lookback_minutes": "Dosis höchstens so lange vor dem Bezug",
-          "stop_switch": "Stopp-Schalter"
+          "stop_switch": "Stopp-Schalter",
+          "pump_power": "Pumpenleistung"
         },
         "data_description": {
           "tail_seconds": "Mit Auto-Stopp: Nach dem Abschalten läuft der Timer der Waage weiter, bis das Gewicht ruhig ist, und dann noch so lange für späte Tropfen; erst dann wird der Timer angehalten, und das Gewicht in diesem Moment ist das Endgewicht (und das, woraus der Auto-Stopp lernt). Abheben der Tasse beendet das sofort. Ohne Auto-Stopp (Timer von Hand oder von der Waage gestoppt) wird nach dem Timer-Stopp ebenfalls so lange weiter aufgezeichnet, aber die angehaltene Waage sendet kein Gewicht, Tropfen nach dem Stopp zählen also nicht: Stoppe den Timer erst, wenn die Tropfen drin sind.",
@@ -396,7 +690,8 @@
           "stability_tolerance": "Wie stark das Gewicht schwanken darf und trotzdem als stabil für die Dosis gilt.",
           "stability_seconds": "Wie lange das Gewicht stabil bleiben muss, damit es als Dosis gilt.",
           "dose_lookback_minutes": "Nur Gewichtsplateaus, die höchstens so lange vor dem Bezug lagen, können seine Dosis werden; ältere werden ignoriert.",
-          "stop_switch": "Optional. Ein Schalter, der den Bezug beim Ausschalten beendet, meist die Steckdose der Espressomaschine. Während eines Bezugs schaltet die Integration ihn so früh aus, dass die Tasse nach dem Nachtropfen beim Ziel landet, und lernt Verzögerung und Nachtropfen der Maschine aus jedem Bezug. Das Ziel stellst du über die Entitäten „Zielverhältnis“ (Verhältnis × erkannte Dosis) oder „Zielgewicht“ (feste Gramm, auch wenn keine Dosis erkannt wurde) ein. Leer lassen, um den Auto-Stopp abzuschalten."
+          "stop_switch": "Optional. Ein Schalter, der den Bezug beim Ausschalten beendet, meist die Steckdose der Espressomaschine. Während eines Bezugs schaltet die Integration ihn so früh aus, dass die Tasse nach dem Nachtropfen beim Ziel landet, und lernt Verzögerung und Nachtropfen der Maschine aus jedem Bezug. Das Ziel stellst du über die Entitäten „Zielverhältnis“ (Verhältnis × erkannte Dosis) oder „Zielgewicht“ (feste Gramm, auch wenn keine Dosis erkannt wurde) ein. Leer lassen, um den Auto-Stopp abzuschalten.",
+          "pump_power": "Optional, experimentell. Eine Number-Entität, die die Pumpenleistung setzt (z. B. ein Phasen- oder Pulspaket-Dimmer im Pumpenzweig). Ihr Bereich (min bis max) gilt als 0–100 %. Mit ihr und dem Stopp-Schalter kann die Pumpendrosselung einen Bezug bremsen, der zu früh fertig würde (Entität „Pumpendrosselung“: Aus, Beobachten, Drosseln). Die Pumpe muss ohne Home Assistant selbst auf volle Leistung zurückfallen. Leer lassen, wenn die Maschine so etwas nicht hat: die Drosselung beobachtet dann nur."
         }
       },
       "add_bean": {
@@ -405,12 +700,16 @@
         "data": {
           "name": "Name",
           "ratio": "Zielverhältnis",
-          "note": "Notiz"
+          "note": "Notiz",
+          "shot_time": "Ziel-Bezugszeit",
+          "profile": "Pumpenprofil"
         },
         "data_description": {
           "name": "Erscheint in der Entität „Bohne“, in der Bezugskarte und wird mit jedem Bezug gespeichert, der entsteht, während sie aktiv ist. Muss eindeutig sein.",
-          "ratio": "Ausbeute / Dosis für diese Bohne, z. B. 2,0 für 18 g rein, 36 g raus. Wählst du die Bohne, wird das Zielverhältnis des Auto-Stopps darauf gesetzt.",
-          "note": "Optional, für dich (Rösterei, Röstdatum, Mahlgrad)."
+          "ratio": "Ausbeute / Dosis für diese Bohne mit dem Pumpenprofil unten (ohne Profil: Standard), z. B. 2,0 für 18 g rein, 36 g raus. Die Bohne merkt sich je Pumpenprofil ein Verhältnis; die für andere Profile bleiben. Wählst du die Bohne, wird das Zielverhältnis des Auto-Stopps darauf gesetzt.",
+          "note": "Optional, für dich (Rösterei, Röstdatum, Mahlgrad).",
+          "shot_time": "Optional. Ziel-Bezugszeit der Pumpendrosselung für diese Bohne (Pumpe an bis Pumpe aus). Leer: die globale „Ziel-Bezugszeit“.",
+          "profile": "Optional. Wählst du die Bohne, wird auch dieses Pumpenprofil gewählt; wählst du bei aktiver Bohne ein anderes Profil, wird es ihres. Leer: das aktive Profil bleibt, bis eins gewählt wird."
         }
       },
       "edit_bean": {
@@ -426,12 +725,16 @@
         "data": {
           "name": "Name",
           "ratio": "Zielverhältnis",
-          "note": "Notiz"
+          "note": "Notiz",
+          "shot_time": "Ziel-Bezugszeit",
+          "profile": "Pumpenprofil"
         },
         "data_description": {
           "name": "Erscheint in der Entität „Bohne“, in der Bezugskarte und wird mit jedem Bezug gespeichert, der entsteht, während sie aktiv ist. Muss eindeutig sein.",
-          "ratio": "Ausbeute / Dosis für diese Bohne, z. B. 2,0 für 18 g rein, 36 g raus. Wählst du die Bohne, wird das Zielverhältnis des Auto-Stopps darauf gesetzt.",
-          "note": "Optional, für dich (Rösterei, Röstdatum, Mahlgrad)."
+          "ratio": "Ausbeute / Dosis für diese Bohne mit dem Pumpenprofil unten (ohne Profil: Standard), z. B. 2,0 für 18 g rein, 36 g raus. Die Bohne merkt sich je Pumpenprofil ein Verhältnis; die für andere Profile bleiben. Wählst du die Bohne, wird das Zielverhältnis des Auto-Stopps darauf gesetzt.",
+          "note": "Optional, für dich (Rösterei, Röstdatum, Mahlgrad).",
+          "shot_time": "Optional. Ziel-Bezugszeit der Pumpendrosselung für diese Bohne (Pumpe an bis Pumpe aus). Leer: die globale „Ziel-Bezugszeit“.",
+          "profile": "Optional. Wählst du die Bohne, wird auch dieses Pumpenprofil gewählt; wählst du bei aktiver Bohne ein anderes Profil, wird es ihres. Leer: das aktive Profil bleibt, bis eins gewählt wird."
         }
       },
       "delete_bean": {
@@ -512,11 +815,19 @@
         },
         "ratio": {
           "name": "Zielverhältnis",
-          "description": "Ausbeute / Dosis, 0,5–5. Leer: das aktuelle Zielverhältnis der Waage."
+          "description": "Ausbeute / Dosis, 0,5–5, für das Pumpenprofil der Bohne (ohne Profil: Standard). Leer: das aktuelle Zielverhältnis der Waage."
         },
         "note": {
           "name": "Notiz",
           "description": "Optional, z. B. Rösterei oder Mahlgrad."
+        },
+        "shot_time": {
+          "name": "Ziel-Bezugszeit",
+          "description": "Optional: Ziel-Bezugszeit der Pumpendrosselung für diese Bohne (s). Leer: die globale."
+        },
+        "profile": {
+          "name": "Pumpenprofil",
+          "description": "Optional: Pumpenprofil (Name), das mit dieser Bohne gewählt wird. Leer: das aktive bleibt."
         },
         "activate": {
           "name": "Aktivieren",
@@ -549,16 +860,99 @@
           "description": "Konfigurationseintrag der Waage. Nur bei mehreren Waagen nötig."
         }
       }
+    },
+    "import_profile": {
+      "name": "Pumpenprofil importieren",
+      "description": "Importiert ein Pumpenprofil im GaggiMate-Profilformat (unterstützte Teilmenge, siehe README). Druckziele brauchen einen Drucksensor und werden abgelehnt.",
+      "fields": {
+        "profile": {
+          "name": "Profil",
+          "description": "Das Profil als JSON-Objekt oder als JSON-Text."
+        },
+        "overwrite": {
+          "name": "Überschreiben",
+          "description": "Ein importiertes Profil mit demselben Namen ersetzen (eingebaute nicht)."
+        },
+        "activate": {
+          "name": "Aktivieren",
+          "description": "Sofort zum aktiven Pumpenprofil machen."
+        },
+        "config_entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Nur bei mehreren Waagen nötig."
+        }
+      }
+    },
+    "delete_profile": {
+      "name": "Pumpenprofil löschen",
+      "description": "Löscht ein importiertes Pumpenprofil. War es aktiv, wird Standard aktiv.",
+      "fields": {
+        "label": {
+          "name": "Name",
+          "description": "Name (label) des Profils."
+        },
+        "config_entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Nur bei mehreren Waagen nötig."
+        }
+      }
+    },
+    "export_profile": {
+      "name": "Pumpenprofil exportieren",
+      "description": "Gibt ein Pumpenprofil als JSON zurück (Antwortdaten).",
+      "fields": {
+        "label": {
+          "name": "Name",
+          "description": "Name (label) des Profils. Leer: das aktive."
+        },
+        "config_entry_id": {
+          "name": "Waage",
+          "description": "Konfigurationseintrag der Waage. Nur bei mehreren Waagen nötig."
+        }
+      }
     }
   },
   "issues": {
     "stop_switch_unavailable": {
-      "title": "Stopp-Schalter von {name} ist nicht verfügbar",
-      "description": "Der Auto-Stopp von {name} nutzt den Schalter `{entity_id}`, aber den gibt es nicht oder er ist nicht verfügbar, deshalb werden Bezüge nicht beim Ziel gestoppt. Mach den Schalter wieder verfügbar oder wähle einen anderen (oder keinen) unter Einstellungen > Geräte & Dienste > DiFluid Microbalance > Konfigurieren > Bezugserkennung und Stopp-Schalter. Diese Meldung verschwindet von selbst, sobald der Schalter wieder da ist."
+      "title": "Stopp-Schalter von {name} war nicht nutzbar",
+      "description": "Der Auto-Stopp von {name} nutzt den Schalter `{entity_id}`, aber den gibt es nicht, oder er fehlte oder war nicht verfügbar, als der Auto-Stopp die Maschine ausschalten wollte, deshalb werden Bezüge nicht beim Ziel gestoppt. Ein Schalter, der nur bei ausgeschalteter Maschine nicht verfügbar ist (z. B. ein Relais an derselben Steckdose), wird nicht gemeldet. Mach den Schalter wieder verfügbar oder wähle einen anderen (oder keinen) unter Einstellungen > Geräte & Dienste > DiFluid Microbalance > Konfigurieren > Bezugserkennung und Stopp-Schalter. Diese Meldung verschwindet von selbst, sobald der Schalter wieder da ist."
     },
     "stop_switch_latency_unknown": {
       "title": "Stopp-Schalter von {name} meldet „aus“ nicht rechtzeitig",
       "description": "Der Auto-Stopp von {name} schaltet `{entity_id}` aus, aber bei den letzten {count} Auto-Stopps in Folge hat der Schalter nicht innerhalb von 5 Sekunden „aus“ gemeldet (oder der Aufruf schlug fehl). Ohne diese Meldung lässt sich die Verzögerung des Schalters nicht vom Nachtropfen trennen, deshalb wurden diese Bezüge nicht gelernt und der Auto-Stopp passt sich nicht mehr an. Prüfe die Verbindung des Schalters (z. B. Zigbee-Empfang, MQTT-Meldungen) oder wähle einen anderen Schalter unter Einstellungen > Geräte & Dienste > DiFluid Microbalance > Konfigurieren > Bezugserkennung und Stopp-Schalter. Diese Meldung verschwindet von selbst beim nächsten Auto-Stopp mit gemessener Latenz."
+    },
+    "profile_bloom_scale_auto_stop": {
+      "title": "Pumpenprofil {profile} von {name}: Auto-Timerstopp der Waage ausschalten",
+      "description": "Das aktive Pumpenprofil {profile} hat eine Phase mit ausgeschalteter Pumpe (0 %, Blooming), und der waageneigene *Auto-Timerstopp* ist an. Die Waage kann ihren Timer anhalten, solange kein Kaffee fließt; das beendet den Bezug – und damit den Auto-Stopp – mitten im Shot. Schalte den Schalter *Auto-Timerstopp* von {name} aus oder wähle ein Profil ohne 0-%-Phase. Die Meldung verschwindet von selbst."
+    },
+    "profile_bloom_pump_min": {
+      "title": "Pumpenprofil {profile} von {name}: Pumpe kann nicht ausgeschaltet werden",
+      "description": "Das aktive Pumpenprofil {profile} hat eine Phase mit ausgeschalteter Pumpe (0 %, Blooming), aber die Pumpenleistungs-Entität `{entity_id}` geht nicht unter {min} (ihr Minimum). Diese Phase läuft stattdessen auf dem Minimum – eine langsame Vorbrühung, kein Blooming. Erlaube 0 an der Pumpen-Entität (z. B. in ihrer ESPHome-Konfiguration) oder wähle ein Profil ohne 0-%-Phase. Die Meldung verschwindet von selbst."
+    },
+    "auto_stop_cut_failed": {
+      "title": "Auto-Stopp von {name} konnte die Maschine nicht ausschalten",
+      "description": "Der Auto-Stopp von {name} hat {attempts}-mal innerhalb von 2 Minuten versucht, `{entity_id}` auszuschalten, jedes Mal ohne Erfolg; der Bezug ist womöglich weitergelaufen. Schalter prüfen (Verbindung, Stromversorgung) und die Maschine von Hand ausschalten, falls sie noch läuft. Diese Meldung verschwindet, sobald der Schalter „aus“ meldet oder beim nächsten erfolgreichen Auto-Stopp."
+    },
+    "auto_stop_cut_failed_retrying": {
+      "title": "Auto-Stopp von {name} kann die Maschine nicht ausschalten",
+      "description": "Der Auto-Stopp von {name} konnte `{entity_id}` am Ziel nicht ausschalten; der Bezug läuft womöglich weiter: Maschine jetzt prüfen und bei Bedarf von Hand ausschalten. Er versucht es 2 Minuten lang weiter und sofort, sobald der Schalter wieder erreichbar ist. Diese Meldung verschwindet, sobald der Schalter „aus“ meldet oder der Auto-Stopp gelingt."
+    },
+    "auto_stop_cut_failed_pump": {
+      "title": "Auto-Stopp von {name} konnte die Maschine nicht ausschalten",
+      "description": "Der Auto-Stopp von {name} hat {attempts}-mal innerhalb von 2 Minuten versucht, `{entity_id}` auszuschalten, jedes Mal ohne Erfolg; der Bezug ist womöglich weitergelaufen. Die Pumpenleistung wurde wieder auf volle Leistung gesetzt. Schalter prüfen (Verbindung, Stromversorgung) und die Maschine von Hand ausschalten, falls sie noch läuft. Diese Meldung verschwindet, sobald der Schalter „aus“ meldet oder beim nächsten erfolgreichen Auto-Stopp."
+    }
+  },
+  "selector": {
+    "bean_profile": {
+      "options": {
+        "none": "Keins (aktives Profil bleibt)",
+        "standard": "Standard",
+        "soft_preinfusion": "Sanfte Vorbrühung",
+        "blooming": "Blooming",
+        "allonge": "Allongé",
+        "lever": "Hebel-Annäherung",
+        "target_time": "Zielzeit"
+      }
     }
   }
 }

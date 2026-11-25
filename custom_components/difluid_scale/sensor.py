@@ -19,8 +19,14 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from .autostop import AutoStop
 from .brews import BrewHistory
 from .coordinator import DifluidConfigEntry, DifluidData
-from .entity import DifluidBrewEntity, DifluidEntity, DifluidStopEntity
+from .entity import (
+    DifluidBrewEntity,
+    DifluidEntity,
+    DifluidStopEntity,
+    DifluidThrottleEntity,
+)
 from .protocol import DeviceState, WeightUnit
+from .throttle import ThrottleControl
 
 PARALLEL_UPDATES = 0
 
@@ -250,6 +256,46 @@ STOP_SENSORS: tuple[DifluidStopSensorEntityDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class DifluidThrottleSensorEntityDescription(SensorEntityDescription):
+    """Pump throttle sensor description."""
+
+    value_fn: Callable[[ThrottleControl], float | int | None]
+
+
+THROTTLE_SENSORS: tuple[DifluidThrottleSensorEntityDescription, ...] = (
+    DifluidThrottleSensorEntityDescription(
+        key="predicted_shot_time",
+        translation_key="predicted_shot_time",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        suggested_display_precision=1,
+        # Updated at most once a second while a brew is checked.
+        value_fn=lambda th: th.last_prediction,
+    ),
+    DifluidThrottleSensorEntityDescription(
+        key="last_pump_power",
+        translation_key="last_pump_power",
+        native_unit_of_measurement=PERCENTAGE,
+        suggested_display_precision=0,
+        value_fn=lambda th: th.last_power,
+    ),
+    DifluidThrottleSensorEntityDescription(
+        key="throttle_power_exponent",
+        translation_key="throttle_power_exponent",
+        suggested_display_precision=2,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda th: round(th.model.gamma, 3),
+    ),
+    DifluidThrottleSensorEntityDescription(
+        key="throttle_samples",
+        translation_key="throttle_samples",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda th: th.model.count,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: DifluidConfigEntry,
@@ -262,6 +308,9 @@ async def async_setup_entry(
         DifluidBrewSensor(coordinator, desc) for desc in BREW_SENSORS
     )
     async_add_entities(DifluidStopSensor(coordinator, desc) for desc in STOP_SENSORS)
+    async_add_entities(
+        DifluidThrottleSensor(coordinator, desc) for desc in THROTTLE_SENSORS
+    )
 
 
 class DifluidSensor(DifluidEntity, SensorEntity):
@@ -333,6 +382,72 @@ class DifluidStopSensor(DifluidStopEntity, SensorEntity):
         if self.entity_description.key != "stop_deviation":
             return None
         last = self.coordinator.autostop.last
+        deviations = [d["deviation"] for d in stop.throttled_deviations]
+        throttled = {
+            # Stop deviation of the throttled brews on their own (the stop
+            # model is shared): mean and count of the last ones.
+            "throttled_deviation_mean": round(sum(deviations) / len(deviations), 2)
+            if deviations
+            else None,
+            "throttled_deviation_count": len(deviations),
+        }
         if last is None:
-            return None
-        return {k: v for k, v in last.items() if k != "deviation"}
+            return throttled
+        return {**{k: v for k, v in last.items() if k != "deviation"}, **throttled}
+
+
+class DifluidThrottleSensor(DifluidThrottleEntity, SensorEntity):
+    """Pump throttle: prediction, last power, power model."""
+
+    entity_description: DifluidThrottleSensorEntityDescription
+
+    @property
+    def native_value(self) -> float | int | None:
+        """Return the value from the throttle."""
+        return self.entity_description.value_fn(self.coordinator.autostop.throttle)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Prediction: mode, why the last brew was not throttled, the
+        learned power-law exponent; power: the last brew's record; samples:
+        journal sizes like the stop model."""
+        throttle = self.coordinator.autostop.throttle
+        key = self.entity_description.key
+        last = throttle.last or {}
+        if key == "predicted_shot_time":
+            return {
+                "mode": throttle.mode,
+                "pump_configured": throttle.pump_entity is not None,
+                "stop_switch_configured": self.coordinator.autostop.switch_entity
+                is not None,
+                "target_shot_time": throttle.effective_target_time(),
+                "last_reason": last.get("reason"),
+                "prediction_exponent": round(throttle.prediction_exponent, 3),
+                "prediction_exponent_samples": len(throttle.exponent.samples),
+                "prediction_exponent_throttled_samples": len(
+                    throttle.exponent_throttled.samples
+                ),
+            }
+        if key == "last_pump_power":
+            return {
+                k: last.get(k)
+                for k in (
+                    "mode",
+                    "applied",
+                    "triggered",
+                    "unreachable",
+                    "unreachable_reason",
+                    "would_set",
+                    "would_need_floor",
+                    "grind_finer",
+                    "target_time",
+                    "predicted_at_trigger",
+                    "end_shot_time",
+                )
+            }
+        if key == "throttle_samples":
+            return {
+                "journal_samples": len(throttle.journal),
+                "journal_base_samples": throttle.journal.base.count,
+            }
+        return None

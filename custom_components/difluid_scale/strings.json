@@ -10,13 +10,20 @@
       },
       "bluetooth_confirm": {
         "description": "Do you want to set up {name}?"
+      },
+      "reconfigure": {
+        "description": "Choose the scale this entry uses from now on (e.g. a replacement). Brew history, learned models, bean and pump profiles, settings and entity IDs are kept.",
+        "data": {
+          "address": "Device"
+        }
       }
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "already_in_progress": "[%key:common::config_flow::abort::already_in_progress%]",
       "no_devices_found": "No scale found. Turn the scale on and try again.",
-      "not_supported": "Device not supported"
+      "not_supported": "Device not supported",
+      "reconfigure_successful": "[%key:common::config_flow::abort::reconfigure_successful%]"
     }
   },
   "entity": {
@@ -135,7 +142,8 @@
               "brew_discarded": "Brew discarded",
               "brew_truncated": "Brew truncated",
               "cup_lifted": "Cup lifted before the drips settled",
-              "switch_latency_unknown": "Stop switch latency unknown"
+              "switch_latency_unknown": "Stop switch latency unknown",
+              "delayed_data": "Delayed scale data"
             }
           },
           "target_source": {
@@ -159,6 +167,120 @@
           },
           "adjusted_overshoot": {
             "name": "Adjusted overshoot"
+          },
+          "throttled": {
+            "name": "Pump throttled"
+          },
+          "throttled_deviation_mean": {
+            "name": "Mean deviation of throttled brews"
+          },
+          "throttled_deviation_count": {
+            "name": "Throttled brews counted"
+          }
+        }
+      },
+      "predicted_shot_time": {
+        "name": "Predicted shot time",
+        "state_attributes": {
+          "mode": {
+            "name": "Mode",
+            "state": {
+              "off": "Off",
+              "observe": "Observe",
+              "throttle": "Throttle"
+            }
+          },
+          "pump_configured": {
+            "name": "Pump power entity set"
+          },
+          "stop_switch_configured": {
+            "name": "Stop switch set"
+          },
+          "target_shot_time": {
+            "name": "Target shot time"
+          },
+          "last_reason": {
+            "name": "Last brew not throttled because",
+            "state": {
+              "no_target": "No auto-stop target",
+              "no_relay_start": "Not started with the stop switch",
+              "no_first_drop": "Cup not tared",
+              "pump_unavailable": "Pump power entity unavailable",
+              "no_pump": "No pump power entity configured",
+              "timer_after_first_drop": "Scale timer started after the first drop"
+            }
+          },
+          "prediction_exponent": {
+            "name": "Prediction exponent"
+          },
+          "prediction_exponent_samples": {
+            "name": "Prediction exponent samples"
+          },
+          "prediction_exponent_throttled_samples": {
+            "name": "Prediction exponent samples from throttled brews"
+          }
+        }
+      },
+      "last_pump_power": {
+        "name": "Last pump power",
+        "state_attributes": {
+          "mode": {
+            "name": "Mode",
+            "state": {
+              "off": "Off",
+              "observe": "Observe",
+              "throttle": "Throttle"
+            }
+          },
+          "applied": {
+            "name": "Set at the pump"
+          },
+          "triggered": {
+            "name": "Triggered"
+          },
+          "unreachable": {
+            "name": "Target time unreachable"
+          },
+          "grind_finer": {
+            "name": "Grind finer"
+          },
+          "target_time": {
+            "name": "Target shot time"
+          },
+          "predicted_at_trigger": {
+            "name": "Predicted shot time at the trigger"
+          },
+          "end_shot_time": {
+            "name": "Shot time at the end"
+          },
+          "would_set": {
+            "name": "Would have set"
+          },
+          "would_need_floor": {
+            "name": "Would have needed the floor"
+          },
+          "unreachable_reason": {
+            "name": "Unreachable because",
+            "state": {
+              "floor": "Floor reached",
+              "rate_limit": "Corrections limited",
+              "late_trigger": "Triggered too late",
+              "trigger_cap": "Pump not learned – enable learning"
+            }
+          }
+        }
+      },
+      "throttle_power_exponent": {
+        "name": "Pump power exponent"
+      },
+      "throttle_samples": {
+        "name": "Pump throttle learning samples",
+        "state_attributes": {
+          "journal_samples": {
+            "name": "Samples in the learning journal"
+          },
+          "journal_base_samples": {
+            "name": "Older samples"
           }
         }
       }
@@ -183,6 +305,9 @@
       },
       "reset_stop_learning": {
         "name": "Reset stop learning"
+      },
+      "reset_throttle_learning": {
+        "name": "Reset pump throttle learning"
       }
     },
     "event": {
@@ -217,7 +342,9 @@
               "brew_discarded": "Brew discarded",
               "brew_truncated": "Brew truncated",
               "cup_lifted": "Cup lifted before the drips settled",
-              "switch_latency_unknown": "Stop switch latency unknown"
+              "switch_latency_unknown": "Stop switch latency unknown",
+              "delayed_data": "Delayed scale data",
+              "cut_failed": "Cut failed (gave up)"
             }
           },
           "target": {
@@ -253,6 +380,81 @@
           },
           "switch_latency": {
             "name": "Switch latency"
+          },
+          "attempt": {
+            "name": "Attempt"
+          }
+        }
+      },
+      "throttle": {
+        "name": "Pump throttle",
+        "state_attributes": {
+          "event_type": {
+            "name": "Event type",
+            "state": {
+              "triggered": "Triggered",
+              "corrected": "Power changed",
+              "ended": "Ended"
+            }
+          },
+          "mode": {
+            "name": "Mode",
+            "state": {
+              "off": "Off",
+              "observe": "Observe",
+              "throttle": "Throttle"
+            }
+          },
+          "shot_time": {
+            "name": "Shot time"
+          },
+          "target_time": {
+            "name": "Target shot time"
+          },
+          "predicted_shot_time": {
+            "name": "Predicted shot time"
+          },
+          "predicted_at_trigger": {
+            "name": "Predicted at the trigger"
+          },
+          "power": {
+            "name": "Pump power"
+          },
+          "applied": {
+            "name": "Set at the pump"
+          },
+          "target_flow": {
+            "name": "Wanted flow"
+          },
+          "target_weight": {
+            "name": "Wanted weight now"
+          },
+          "unreachable": {
+            "name": "Target time unreachable"
+          },
+          "grind_finer": {
+            "name": "Grind finer"
+          },
+          "bean": {
+            "name": "Bean"
+          },
+          "end_reason": {
+            "name": "Ended by"
+          },
+          "would_set": {
+            "name": "Would have set"
+          },
+          "would_need_floor": {
+            "name": "Would have needed the floor"
+          },
+          "unreachable_reason": {
+            "name": "Unreachable because",
+            "state": {
+              "floor": "Floor reached",
+              "rate_limit": "Corrections limited",
+              "late_trigger": "Triggered too late",
+              "trigger_cap": "Pump not learned – enable learning"
+            }
           }
         }
       }
@@ -266,6 +468,9 @@
       },
       "brew_ready": {
         "name": "Prepare brew"
+      },
+      "throttle_learning": {
+        "name": "Pump throttle learning"
       }
     },
     "select": {
@@ -282,6 +487,68 @@
         "state": {
           "none": "None"
         }
+      },
+      "throttle_mode": {
+        "name": "Pump throttle",
+        "state": {
+          "off": "Off",
+          "observe": "Observe (dry run)",
+          "throttle": "Control pump"
+        }
+      },
+      "pump_profile": {
+        "name": "Pump profile",
+        "state": {
+          "standard": "Standard",
+          "soft_preinfusion": "Soft preinfusion",
+          "blooming": "Blooming",
+          "allonge": "Allongé",
+          "lever": "Lever approximation",
+          "target_time": "Target time"
+        },
+        "state_attributes": {
+          "running": {
+            "state": {
+              "standard": "Standard",
+              "soft_preinfusion": "Soft preinfusion",
+              "blooming": "Blooming",
+              "allonge": "Allongé",
+              "lever": "Lever approximation",
+              "target_time": "Target time"
+            }
+          },
+          "last_outcome_profile": {
+            "state": {
+              "standard": "Standard",
+              "soft_preinfusion": "Soft preinfusion",
+              "blooming": "Blooming",
+              "allonge": "Allongé",
+              "lever": "Lever approximation",
+              "target_time": "Target time"
+            }
+          },
+          "last_brew_profile": {
+            "state": {
+              "standard": "Standard",
+              "soft_preinfusion": "Soft preinfusion",
+              "blooming": "Blooming",
+              "allonge": "Allongé",
+              "lever": "Lever approximation",
+              "target_time": "Target time"
+            }
+          },
+          "running_phase": {
+            "state": {
+              "brew": "Brew",
+              "preinfusion": "Preinfusion",
+              "fill": "Fill",
+              "bloom": "Bloom",
+              "flow": "Flow",
+              "peak": "Peak",
+              "decline": "Decline"
+            }
+          }
+        }
       }
     },
     "number": {
@@ -293,6 +560,20 @@
       },
       "target_ratio": {
         "name": "Target ratio"
+      },
+      "target_shot_time": {
+        "name": "Target shot time",
+        "state_attributes": {
+          "effective": {
+            "name": "For the active bean"
+          }
+        }
+      },
+      "throttle_floor": {
+        "name": "Pump throttle floor"
+      },
+      "standard_pump_power": {
+        "name": "Standard pump power"
       }
     }
   },
@@ -359,6 +640,18 @@
     },
     "bean_required": {
       "message": "Choose one of the beans; “none” is only available while there are no bean profiles."
+    },
+    "profile_invalid": {
+      "message": "Invalid pump profile: {error}"
+    },
+    "profile_exists": {
+      "message": "A pump profile “{label}” exists already. Use overwrite: true to replace it."
+    },
+    "profile_builtin": {
+      "message": "“{label}” is a built-in pump profile; it cannot be replaced or deleted."
+    },
+    "profile_unknown": {
+      "message": "No pump profile “{label}”."
     }
   },
   "options": {
@@ -385,7 +678,8 @@
           "stability_tolerance": "Dose stability tolerance (±)",
           "stability_seconds": "Dose stable for at least",
           "dose_lookback_minutes": "Dose lookback before brew start",
-          "stop_switch": "Stop switch"
+          "stop_switch": "Stop switch",
+          "pump_power": "Pump power"
         },
         "data_description": {
           "tail_seconds": "With the auto-stop: after the cut the scale's timer keeps running until the weight is calm, then this much longer for late drops; then the timer is stopped and the weight at that moment is the yield (and what the auto-stop learns from). Lifting the cup ends it at once. Without the auto-stop (timer stopped by hand or by the scale) recording also goes on for this long after the timer stop, but the paused scale sends no weight, so drops after the stop are not counted: stop the timer only once the drips are in.",
@@ -396,7 +690,8 @@
           "stability_tolerance": "How much the weight may wobble and still count as stable when detecting the dose.",
           "stability_seconds": "How long the weight has to stay stable to count as the dose.",
           "dose_lookback_minutes": "Only weight plateaus this recent before the brew can become its dose; older ones are ignored.",
-          "stop_switch": "Optional. A switch that ends the shot when turned off, usually the smart plug of the espresso machine. During a brew the integration turns it off early enough that the cup ends on the target once the drips have settled, and learns the machine's delay and drip from every shot. Set the target with the entities 'Target ratio' (ratio × detected dose) or 'Target yield' (fixed grams, also used when no dose was detected). Leave empty to disable the auto-stop."
+          "stop_switch": "Optional. A switch that ends the shot when turned off, usually the smart plug of the espresso machine. During a brew the integration turns it off early enough that the cup ends on the target once the drips have settled, and learns the machine's delay and drip from every shot. Set the target with the entities 'Target ratio' (ratio × detected dose) or 'Target yield' (fixed grams, also used when no dose was detected). Leave empty to disable the auto-stop.",
+          "pump_power": "Optional, experimental. A number entity that sets the pump power (e.g. a phase or pulse-skip dimmer in the pump circuit). Its range (min to max) is used as 0-100 %. With it and the stop switch, the pump throttle can slow down a shot that would end too early (entity 'Pump throttle': off, observe, throttle). The pump must fall back to full power on its own when Home Assistant is unreachable. Leave empty if your machine has no such control: the throttle then only observes."
         }
       },
       "add_bean": {
@@ -405,12 +700,16 @@
         "data": {
           "name": "Name",
           "ratio": "Target ratio",
-          "note": "Note"
+          "note": "Note",
+          "shot_time": "Target shot time",
+          "profile": "Pump profile"
         },
         "data_description": {
           "name": "Shown in the entity 'Bean', in the brew card and saved with every brew made while it is active. Must be unique.",
-          "ratio": "Yield / dose for this bean, e.g. 2.0 for 18 g in, 36 g out. Selecting the bean sets the target ratio of the auto-stop to it.",
-          "note": "Optional, for yourself (roaster, roast date, grind setting)."
+          "ratio": "Yield / dose for this bean with the pump profile below (Standard without one), e.g. 2.0 for 18 g in, 36 g out. The bean keeps a ratio per pump profile: its ratios for other profiles stay. Selecting the bean sets the target ratio of the auto-stop to it.",
+          "note": "Optional, for yourself (roaster, roast date, grind setting).",
+          "shot_time": "Optional. Target shot time of the pump throttle for this bean (pump on to pump off). Empty: the global 'Target shot time'.",
+          "profile": "Optional. Selecting this bean also selects this pump profile; choosing another profile while the bean is active makes that one the bean's. Empty: the active profile stays until one is chosen."
         }
       },
       "edit_bean": {
@@ -426,12 +725,16 @@
         "data": {
           "name": "Name",
           "ratio": "Target ratio",
-          "note": "Note"
+          "note": "Note",
+          "shot_time": "Target shot time",
+          "profile": "Pump profile"
         },
         "data_description": {
           "name": "Shown in the entity 'Bean', in the brew card and saved with every brew made while it is active. Must be unique.",
-          "ratio": "Yield / dose for this bean, e.g. 2.0 for 18 g in, 36 g out. Selecting the bean sets the target ratio of the auto-stop to it.",
-          "note": "Optional, for yourself (roaster, roast date, grind setting)."
+          "ratio": "Yield / dose for this bean with the pump profile below (Standard without one), e.g. 2.0 for 18 g in, 36 g out. The bean keeps a ratio per pump profile: its ratios for other profiles stay. Selecting the bean sets the target ratio of the auto-stop to it.",
+          "note": "Optional, for yourself (roaster, roast date, grind setting).",
+          "shot_time": "Optional. Target shot time of the pump throttle for this bean (pump on to pump off). Empty: the global 'Target shot time'.",
+          "profile": "Optional. Selecting this bean also selects this pump profile; choosing another profile while the bean is active makes that one the bean's. Empty: the active profile stays until one is chosen."
         }
       },
       "delete_bean": {
@@ -512,11 +815,19 @@
         },
         "ratio": {
           "name": "Target ratio",
-          "description": "Yield / dose, 0.5–5. Empty: the current target ratio of the scale."
+          "description": "Yield / dose, 0.5–5, for the bean's pump profile (Standard without one). Empty: the current target ratio of the scale."
         },
         "note": {
           "name": "Note",
           "description": "Optional, e.g. roaster or grind setting."
+        },
+        "shot_time": {
+          "name": "Target shot time",
+          "description": "Optional: target shot time of the pump throttle for this bean (s). Empty: the global one."
+        },
+        "profile": {
+          "name": "Pump profile",
+          "description": "Optional: pump profile (label) selected together with this bean. Empty: the active profile stays."
         },
         "activate": {
           "name": "Activate",
@@ -549,16 +860,99 @@
           "description": "Config entry of the scale. Only needed with more than one scale."
         }
       }
+    },
+    "import_profile": {
+      "name": "Import pump profile",
+      "description": "Imports a pump profile in the GaggiMate profile format (supported subset, see README). Pressure targets need a pressure sensor and are rejected.",
+      "fields": {
+        "profile": {
+          "name": "Profile",
+          "description": "The profile as a JSON object or as JSON text."
+        },
+        "overwrite": {
+          "name": "Overwrite",
+          "description": "Replace an imported profile with the same label (built-ins cannot be replaced)."
+        },
+        "activate": {
+          "name": "Activate",
+          "description": "Make it the active pump profile right away."
+        },
+        "config_entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Only needed with more than one scale."
+        }
+      }
+    },
+    "delete_profile": {
+      "name": "Delete pump profile",
+      "description": "Deletes an imported pump profile. If it was active, Standard becomes active.",
+      "fields": {
+        "label": {
+          "name": "Label",
+          "description": "Label (name) of the profile."
+        },
+        "config_entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Only needed with more than one scale."
+        }
+      }
+    },
+    "export_profile": {
+      "name": "Export pump profile",
+      "description": "Returns a pump profile as JSON (response data).",
+      "fields": {
+        "label": {
+          "name": "Label",
+          "description": "Label (name) of the profile. Empty: the active one."
+        },
+        "config_entry_id": {
+          "name": "Scale",
+          "description": "Config entry of the scale. Only needed with more than one scale."
+        }
+      }
     }
   },
   "issues": {
     "stop_switch_unavailable": {
-      "title": "Stop switch of {name} is not available",
-      "description": "The auto-stop of {name} uses the switch `{entity_id}`, but it does not exist or is unavailable, so brews are not stopped at the target. Make the switch available again or choose another one (or none) under Settings > Devices & services > DiFluid Microbalance > Configure > Brew detection and stop switch. This message disappears by itself once the switch is back."
+      "title": "Stop switch of {name} could not be used",
+      "description": "The auto-stop of {name} uses the switch `{entity_id}`, but it does not exist, or it was missing or unavailable when the auto-stop tried to switch the machine off, so brews are not stopped at the target. A switch that only becomes unavailable while the machine is off (e.g. a relay powered from the same socket) is not reported. Make the switch available again or choose another one (or none) under Settings > Devices & services > DiFluid Microbalance > Configure > Brew detection and stop switch. This message disappears by itself once the switch is back."
     },
     "stop_switch_latency_unknown": {
       "title": "Stop switch of {name} does not report off in time",
       "description": "The auto-stop of {name} turns off `{entity_id}`, but at the last {count} auto-stops in a row the switch did not report `off` within 5 seconds (or the call failed). Without that report the switch's delay cannot be separated from the drip, so these shots were not learned and the auto-stop no longer adapts. Check the switch's connection (e.g. Zigbee signal, MQTT reporting) or choose another switch under Settings > Devices & services > DiFluid Microbalance > Configure > Brew detection and stop switch. This message disappears by itself at the next auto-stop with a measured latency."
+    },
+    "profile_bloom_scale_auto_stop": {
+      "title": "Pump profile {profile} of {name}: turn off the scale's auto stop timing",
+      "description": "The active pump profile {profile} has a phase with the pump off (0 %, a bloom), and the scale's own *Auto stop timing* is on. The scale may stop its timer while no coffee flows, which ends the brew – and with it the auto-stop – in the middle of the shot. Turn off the switch *Auto stop timing* of {name}, or choose a profile without a 0 % phase. This message disappears by itself."
+    },
+    "profile_bloom_pump_min": {
+      "title": "Pump profile {profile} of {name}: the pump cannot be switched off",
+      "description": "The active pump profile {profile} has a phase with the pump off (0 %, a bloom), but the pump power entity `{entity_id}` cannot go below {min} (its minimum). That phase runs at the minimum instead – a slow preinfusion, not a bloom. Allow 0 on the pump entity (e.g. in its ESPHome configuration) or choose a profile without a 0 % phase. This message disappears by itself."
+    },
+    "auto_stop_cut_failed": {
+      "title": "Auto-stop of {name} could not switch the machine off",
+      "description": "The auto-stop of {name} tried {attempts} times within 2 minutes to turn off `{entity_id}` and failed every time, so the shot may have run on. Check the switch (connection, power) and turn the machine off by hand if it still runs. This message disappears when the switch reports off or at the next successful auto-stop."
+    },
+    "auto_stop_cut_failed_retrying": {
+      "title": "Auto-stop of {name} cannot switch the machine off",
+      "description": "The auto-stop of {name} could not turn off `{entity_id}` at the target, so the shot may be running on: check the machine now and turn it off by hand if needed. It keeps trying for 2 minutes, and at once when the switch is reachable again. This message disappears when the switch reports off or the auto-stop succeeds."
+    },
+    "auto_stop_cut_failed_pump": {
+      "title": "Auto-stop of {name} could not switch the machine off",
+      "description": "The auto-stop of {name} tried {attempts} times within 2 minutes to turn off `{entity_id}` and failed every time, so the shot may have run on. The pump power was set back to full power. Check the switch (connection, power) and turn the machine off by hand if it still runs. This message disappears when the switch reports off or at the next successful auto-stop."
+    }
+  },
+  "selector": {
+    "bean_profile": {
+      "options": {
+        "none": "None (keep the active profile)",
+        "standard": "Standard",
+        "soft_preinfusion": "Soft preinfusion",
+        "blooming": "Blooming",
+        "allonge": "Allongé",
+        "lever": "Lever approximation",
+        "target_time": "Target time"
+      }
     }
   }
 }

@@ -8,7 +8,12 @@ Messages (sent as events of ``difluid_scale/subscribe_live``):
   point recorded so far.
 - ``live_points``: ``points`` (only new ``[t, weight, flow]``, t = seconds
   since start), plus current values. Coalesced to the brew tick (0.25 s),
-  never one message per BLE frame.
+  never one message per BLE frame. ``replace_from`` (0.7.0b6, seconds or
+  null): frames that came late (a backlog, or a bunch) were placed back
+  at their scale time after points from there had been sent; the client
+  first drops its points with ``t >= replace_from``, then appends
+  ``points`` (which then start at ``replace_from``). Only for that:
+  nothing else is changed after it was sent.
 - ``live_end``: ``brew_id`` + ``brew`` (summary) when stored, otherwise
   ``reason`` (``too_short`` / ``low_yield`` / ``no_samples`` / ``unloaded``)
   and an English ``detail``.
@@ -31,7 +36,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from .brew import BrewTracker
+from .brew import PROFILE_RESOLUTION, BrewTracker
 
 LIVE_START = "live_start"
 LIVE_POINTS = "live_points"
@@ -49,20 +54,26 @@ class LiveBrew:
         target_fn: Callable[[float, float | None], dict[str, Any] | None]
         | None = None,
         cut_fn: Callable[[float], float | None] | None = None,
+        throttle_fn: Callable[[float], dict[str, Any] | None] | None = None,
     ) -> None:
         """Start following the tracker's active brew.
 
         ``target_fn(start, dose)`` gives the auto-stop target shown with the
         live values (``target``, ``target_source``; None = auto-stop off);
         ``cut_fn(start)`` the seconds to the auto-stop cut (pump off), where
-        the brew time stops while the weighing goes on.
+        the brew time stops while the weighing goes on; ``throttle_fn(start)``
+        the pump throttle's live values (``throttle``: relay offset, first
+        drop in shot time, target time, power trace in profile time, ...;
+        None without a relay start).
         """
         assert tracker.start is not None
         self.start: float = tracker.start
         self.dose = tracker.dose_candidate
         self._target_fn = target_fn
         self._cut_fn = cut_fn
+        self._throttle_fn = throttle_fn
         self.points: list[list[float]] = []
+        self._keys: list[int] = []  # bucket key of each point
         self._key = -1
         self._last_current: dict[str, Any] | None = None
 
@@ -90,13 +101,34 @@ class LiveBrew:
             "cut": cut,
             "target": target["target"] if target else None,
             "target_source": target["target_source"] if target else None,
+            "throttle": self._throttle_fn(self.start) if self._throttle_fn else None,
         }
 
-    def _collect(self, tracker: BrewTracker) -> list[list[float]]:
+    def _collect(
+        self, tracker: BrewTracker
+    ) -> tuple[list[list[float]], float | None]:
+        """New points, and ``replace_from`` when sent points were revised."""
+        replace_from: float | None = None
+        revised = tracker.pop_revision()
+        if revised is not None and revised <= self._key:
+            # Drop by the rounded t the client compares: a kept point must
+            # round below the cut, so step back over points that round onto it.
+            key = revised
+            while any(
+                k < key and p[0] >= round(key * PROFILE_RESOLUTION, 2)
+                for k, p in zip(self._keys, self.points)
+            ):
+                key -= 1
+            replace_from = round(key * PROFILE_RESOLUTION, 2)
+            keep = [i for i, p in enumerate(self.points) if p[0] < replace_from]
+            self.points = [self.points[i] for i in keep]
+            self._keys = [self._keys[i] for i in keep]
+            self._key = key - 1
         new, self._key = tracker.live_points_since(self._key)
         rounded = [[round(t, 2), round(w, 1), round(f, 1)] for t, w, f in new]
         self.points.extend(rounded)
-        return rounded
+        self._keys.extend(int(t / PROFILE_RESOLUTION) for t, _, _ in new)
+        return rounded, replace_from
 
     def start_message(self, tracker: BrewTracker, now: float) -> dict[str, Any]:
         """``live_start`` with everything recorded so far (collects first)."""
@@ -127,12 +159,17 @@ class LiveBrew:
         self, tracker: BrewTracker, now: float
     ) -> dict[str, Any] | None:
         """``live_points`` with new points, or None if nothing changed."""
-        points = self._collect(tracker)
+        points, replace_from = self._collect(tracker)
         current = self._current(tracker, now)
-        if not points and current == self._last_current:
+        if not points and replace_from is None and current == self._last_current:
             return None
         self._last_current = current
-        return {"type": LIVE_POINTS, "points": points, **current}
+        return {
+            "type": LIVE_POINTS,
+            "points": points,
+            "replace_from": replace_from,
+            **current,
+        }
 
 
 def end_message(

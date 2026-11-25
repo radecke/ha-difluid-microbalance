@@ -110,10 +110,15 @@ _TIMER_STOPPED_STATES = {
 _TIMER_RESET_STATES = {DeviceState.IDLE, DeviceState.TIMER_READY}
 
 type KeyEventListener = Callable[[str], None]
+
 type ReadyListener = Callable[[], None]
 
 type DifluidConfigEntry = ConfigEntry[DifluidCoordinator]
 
+
+# Brew clock: a wall clock step larger than this against the monotonic
+# clock (NTP) is not followed while a brew is pending (see ``_now``).
+CLOCK_STEP = 1.0  # s
 
 # Diagnostics (0.5.0): log raw bytes when the raw weight jumps this much
 # (x10 g, i.e. 50 g); hunting a recurring single -197.5 g frame.
@@ -185,6 +190,11 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._status: StatusData | None = None
         self._settings: dict[int, int] = {}
         self._changed = False
+        # Warned about a weight unit without a gram conversion (audit B8).
+        self._unit_warned = False
+        # Brew clock (audit A8): wall time for stored starts, but durations
+        # inside a brew follow the monotonic clock (see ``_now``).
+        self._clock_anchor: tuple[float, float] | None = None
         # Throttled error logging per handler (_guarded).
         self._error_logged: dict[str, float] = {}
         self._error_repeats: dict[str, int] = {}
@@ -270,7 +280,8 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._stop_brew_tick()
         self._stop_ready_timeout()
         self.autostop.async_stop_watching()
-        self.brews.set_active(self.brew_tracker.export_active(time.time()))
+        await self.autostop.throttle.async_shutdown()
+        self.brews.set_active(self.brew_tracker.export_active(self._now()))
         if self._live is not None:
             self._live = None
             self._send_live(end_message(reason="unloaded"))
@@ -389,6 +400,14 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                     ble_device,
                     ble_device.name or self.address,
                     disconnected_callback=self._on_disconnected,
+                    # Retries take the best path known at that moment
+                    # (another proxy or adapter), not the first one.
+                    ble_device_callback=lambda: (
+                        bluetooth.async_ble_device_from_address(
+                            self.hass, self.address, connectable=True
+                        )
+                        or ble_device
+                    ),
                 )
             except (BleakError, TimeoutError) as err:
                 _LOGGER.debug("%s: connect failed: %s", self.address, err)
@@ -472,8 +491,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                     "%s: reading setting %s failed: %s", self.address, cmd, err
                 )
                 return
-        if len(self.device_info) < 3:
-            await self._async_fetch_device_info()
+        # Serial and model are read once; the firmware on every connect (it
+        # changes with an update over the DiFluid app, audit A3).
+        self.device_info.pop(INFO_FIRMWARE, None)
+        await self._async_fetch_device_info()
 
     async def _async_fetch_device_info(self) -> None:
         """Request serial, model and firmware; update the device registry."""
@@ -541,9 +562,11 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         self._stop_poll()
         self._buffer.clear()
         self._serial.reset()
+        # A throttled pump goes back to 100 % at once (no weight any more).
+        self._guarded("pump throttle", self.autostop.throttle.async_ble_lost)
         # A running brew is parked, not closed: it resumes if the scale comes
         # back with the same running timer (see BrewTracker.disconnect).
-        self._handle_brew_result(self.brew_tracker.disconnect(time.time()))
+        self._handle_brew_result(self.brew_tracker.disconnect(self._now()))
         self.async_update_listeners()
         # Reconnect happens on the next advertisement; clear HA's history so
         # an unchanged advertisement (quick power cycle) is not dropped.
@@ -655,7 +678,10 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 sensor is not None
                 and abs(new_sensor.weight_raw - sensor.weight_raw) >= WEIGHT_JUMP_LOG_RAW
             ):
-                _LOGGER.warning(
+                # Debug only (audit A1): placing or lifting a cup does this
+                # every brew; it was a WARNING with the address and raw
+                # frames for every user.
+                _LOGGER.debug(
                     "%s: weight jump %s -> %s (raw), frame data %s, "
                     "recent notifications %s",
                     self.address,
@@ -678,19 +704,29 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                     CMD_SETTINGS_WEIGHT_UNIT: new_sensor.unit,
                 }
                 self._changed = True
-            if (grams := new_sensor.weight_grams) is not None:
-                now = time.time()
+            if (grams := new_sensor.weight_grams) is None:
+                self._guarded("weight unit", self._weight_unconvertible)
+            else:
+                self._unit_warned = False
+                now = self._now()
+                # Backlog detection on a monotonic clock (0.7.0b6).
+                mono = time.monotonic()
                 self._guarded(
                     "brew tracker",
                     lambda: self._handle_brew_result(
                         self.brew_tracker.feed_sample(
-                            now, grams, new_sensor.flow_rate, new_sensor.timer
+                            now, grams, new_sensor.flow_rate, new_sensor.timer, mono
                         )
                     ),
                 )
                 # After the tracker (brew state is current), before the
                 # rest of the frame: the cut goes out without delay.
-                self._guarded("auto-stop", self.autostop.feed_sample, now, grams)
+                # Its time on the scale's clock when it came in a backlog
+                # (never going back, see BrewTracker.data_time).
+                placed = self.brew_tracker.data_time(now)
+                self._guarded(
+                    "auto-stop", self.autostop.feed_sample, now, grams, placed
+                )
                 self._guarded("ready dose", self._refresh_ready_dose)
         elif (new_status := parse_status(frame)) is not None:
             if self._status is None or new_status.raw != self._status.raw:
@@ -718,14 +754,63 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 frame.data.hex(),
             )
 
+    def _now(self) -> float:
+        """Brew clock, epoch seconds (audit A8).
+
+        The wall clock, except while a brew is pending (running, tail,
+        parked) and the wall clock stepped (NTP, by more than CLOCK_STEP
+        against the monotonic clock since the last reading): then the
+        monotonic continuation of the last reading, so durations inside
+        the brew are not distorted. Between brews it follows the wall
+        clock again. Stored values keep their format (epoch seconds)."""
+        wall, mono = time.time(), time.monotonic()
+        anchor = self._clock_anchor
+        if anchor is not None and self.brew_tracker.active:
+            expected = anchor[0] + (mono - anchor[1])
+            if abs(wall - expected) > CLOCK_STEP:
+                return expected
+        self._clock_anchor = (wall, mono)
+        return wall
+
+    @callback
+    def _weight_unconvertible(self) -> None:
+        """A weight frame in a unit without a gram conversion ("gering"):
+        no sample reaches brew detection, auto-stop or throttle (audit B8).
+        A throttled pump goes back to full power (like a BLE drop: no
+        weight, no cut) and a running pump profile ends too (without weight
+        no auto-stop would end its shot); warned once while it lasts if a
+        brew runs, the auto-stop is on or a profile runs."""
+        if not self._unit_warned:
+            self._unit_warned = True
+            profiles = self.autostop.throttle.profiles
+            if (
+                self.brew_tracker.active
+                or self.autostop.enabled
+                or profiles.current is not None
+            ):
+                _LOGGER.warning(
+                    "%s: the scale shows the weight in a unit that cannot be "
+                    "converted to grams: no auto-stop, no pump throttle and "
+                    "no pump profile until it shows grams or ounces again; "
+                    "the pump goes back to full power",
+                    self.address,
+                )
+        self.autostop.throttle.async_ble_lost(reason="no_weight")
+        self.autostop.throttle.profiles.end("no_weight")
+
     # ---------------------------------------------------------------- brews
 
     @callback
     def _device_id(self) -> str | None:
-        device = dr.async_get(self.hass).async_get_device(
-            identifiers={(DOMAIN, self.address)}
-        )
-        return device.id if device else None
+        # Not ``async_get_device``: deprecated from HA 2026.11 on (device
+        # identifiers are no longer unique across config entries).
+        registry = dr.async_get(self.hass)
+        for device in dr.async_entries_for_config_entry(
+            registry, self.config_entry.entry_id
+        ):
+            if (DOMAIN, self.address) in device.identifiers:
+                return device.id
+        return None
 
     @callback
     def _feed_brew_state(self, state: int) -> None:
@@ -737,7 +822,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             return
         self._handle_brew_result(
             self.brew_tracker.feed_timer_state(
-                time.time(), running, reset=state in _TIMER_RESET_STATES
+                self._now(), running, reset=state in _TIMER_RESET_STATES
             )
         )
 
@@ -746,8 +831,21 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         """Store a finished brew; keep live data and the tick in step."""
         if self._unloading:
             return
+        try:
+            self._handle_brew_step(result)
+        finally:
+            # A bean's ratio chosen during the brew applies from here on.
+            self.autostop.apply_deferred_ratio()
+
+    @callback
+    def _handle_brew_step(self, result: BrewResult | None) -> None:
         tracker = self.brew_tracker
         self.autostop.brew_finished(result, tracker.last_discard_reason is not None)
+        throttle = self.autostop.throttle
+        if result is not None:
+            self._guarded("pump throttle", throttle.brew_finished, result.start)
+        elif tracker.last_discard_reason:
+            self._guarded("pump throttle", throttle.brew_discarded)
         if result is not None:
             brew = self.brews.async_add_result(
                 result,
@@ -758,6 +856,8 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
                 switch_latency_unknown=self.autostop.switch_latency_unknown_for(
                     result.start
                 ),
+                relay=throttle.relay_for(result.start),
+                throttle=throttle.brew_record(result.start),
             )
             self.autostop.async_brew_stored(brew)
             summary = brew_summary(brew)
@@ -779,12 +879,15 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
             # Brew start: its bean is fixed now (stored brew, auto-stop).
             self.autostop.brew_bean(tracker.start)
             self._live = LiveBrew(
-                tracker, self.autostop.brew_target, self.autostop.cut_offset
+                tracker,
+                self.autostop.brew_target,
+                self.autostop.cut_offset,
+                self.autostop.throttle.live_info,
             )
             # A running brew suspends the backstop; only its end turns the
             # "Prepare brew" switch off.
             self._stop_ready_timeout()
-            self._send_live(self._live.start_message(tracker, time.time()))
+            self._send_live(self._live.start_message(tracker, self._now()))
         elif not tracker.active and self._live is not None:
             self._end_live(end_message(reason="ended"))
         if tracker.active and self._cancel_brew_tick is None:
@@ -799,7 +902,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         """Stall check, end of tail, parking backstop; coalesced live push."""
         if self._unloading:
             return
-        now = time.time()
+        now = self._now()
         self._handle_brew_result(self.brew_tracker.tick(now))
         if self._live is not None:
             if (message := self._live.update_message(self.brew_tracker, now)):
@@ -829,7 +932,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
         """What a new live subscriber gets first."""
         if self._live is None:
             return {"type": LIVE_IDLE}
-        return self._live.snapshot(self.brew_tracker, time.time())
+        return self._live.snapshot(self.brew_tracker, self._now())
 
     # ---------------------------------------------------------- brew ready
 
@@ -863,7 +966,7 @@ class DifluidCoordinator(DataUpdateCoordinator[DifluidData]):
 
     def ready_dose(self) -> float | None:
         """Dose the next brew would get (shown in the ready view)."""
-        return self.brew_tracker.next_dose(time.time())
+        return self.brew_tracker.next_dose(self._now())
 
     def ready_snapshot(self) -> dict:
         """``live_ready`` for a new subscriber."""

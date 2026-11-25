@@ -69,6 +69,11 @@ class BrewStore(Store[dict[str, Any]]):
     whose measurement ended without a value, ``switch_latency_unknown:
     true``. Brews from before 0.5.1 lack both keys (= never measured) and
     are read with ``.get``, so no version step.
+    0.6.0: brews with a matched pump relay start get ``relay_offset``,
+    ``first_drop_shot``, ``shot_time`` and ``since_last_relay_off`` (see
+    ``apply_relay``), and ``throttle`` (the pump throttle's record, see
+    ``throttle.ThrottleControl.record``) unless it was off. Older brews lack
+    the keys and are read with ``.get``: no version step.
     """
 
     async def _async_migrate_func(
@@ -82,6 +87,30 @@ class BrewStore(Store[dict[str, Any]]):
                 if isinstance(brew, dict):
                     brew.setdefault("bean", None)
         return data
+
+
+def apply_relay(brew: dict[str, Any], relay: dict[str, Any] | None) -> None:
+    """Shot timing from the pump relay (0.6.0), in place.
+
+    ``relay_offset``: s from relay on to profile t = 0 (scale timer start);
+    ``first_drop_shot``: relay on -> first drop (the profile metric plus
+    the offset); ``shot_time``: relay on -> end of the brew time (auto-stop
+    cut, else timer stop); ``since_last_relay_off``: s since the stop
+    switch last went off before this relay start (None: none seen). Only
+    the relay is seen: flushes with the machine's button and steam are
+    not in it. All None without a matched relay start.
+    """
+    offset = relay.get("relay_offset") if relay else None
+    if offset is None:
+        for key in ("relay_offset", "first_drop_shot", "shot_time", "since_last_relay_off"):
+            brew.setdefault(key, None)
+        return
+    brew["relay_offset"] = round(float(offset), 2)
+    drop = (brew.get("metrics") or {}).get("first_drop")
+    brew["first_drop_shot"] = None if drop is None else round(drop + offset, 1)
+    duration = brew.get("duration")
+    brew["shot_time"] = None if duration is None else round(duration + offset, 1)
+    brew["since_last_relay_off"] = relay.get("since_last_relay_off")
 
 
 def brew_summary(brew: dict[str, Any]) -> dict[str, Any]:
@@ -230,8 +259,13 @@ class BrewHistory:
         cut_at: float | None = None,
         switch_latency: float | None = None,
         switch_latency_unknown: bool = False,
+        relay: dict[str, Any] | None = None,
+        throttle: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Store a finished brew, update totals, fire the bus event.
+
+        ``relay``: the pump relay timing (``apply_relay``), ``throttle``: the
+        pump throttle's record of the brew (None: off / nothing).
 
         A continued brew (``result.updated``, e.g. pour-over pause) replaces
         the stored brew with the same start: same id, brew count unchanged,
@@ -248,7 +282,9 @@ class BrewHistory:
         """
         start = datetime.fromtimestamp(result.start, UTC).isoformat()
         if result.updated and (old := self.find_start(start)) is not None:
-            brew = self._async_replace(old, result, target, cut_at, switch_latency)
+            brew = self._async_replace(
+                old, result, target, cut_at, switch_latency, relay, throttle
+            )
             if switch_latency_unknown and brew.get("switch_latency") is None:
                 brew["switch_latency_unknown"] = True
             return brew
@@ -272,6 +308,8 @@ class BrewHistory:
             brew["switch_latency_unknown"] = True
         if metrics := brew_metrics(brew["profile"]):
             brew["metrics"] = metrics
+        apply_relay(brew, relay)
+        brew["throttle"] = throttle
         self.brews.append(brew)
         del self.brews[:-MAX_STORED_BREWS]
         self.brew_count += 1
@@ -310,6 +348,8 @@ class BrewHistory:
         target: dict[str, Any] | None = None,
         cut_at: float | None = None,
         switch_latency: float | None = None,
+        relay: dict[str, Any] | None = None,
+        throttle: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         brew["duration"] = _duration(result, cut_at)
         if switch_latency is not None:
@@ -323,6 +363,12 @@ class BrewHistory:
             brew["metrics"] = metrics
         else:
             brew.pop("metrics", None)
+        if relay is not None:
+            apply_relay(brew, relay)
+        elif brew.get("relay_offset") is not None:
+            apply_relay(brew, brew)  # duration/metrics changed
+        if throttle is not None:
+            brew["throttle"] = throttle
         if brew.get("dose_source") != "manual" and result.dose is not None:
             counted = brew.get("counted_dose") or 0.0
             self.coffee_total += max(0.0, result.dose - counted)
@@ -360,6 +406,11 @@ class BrewHistory:
                 "target": brew.get("target"),
                 "target_source": brew.get("target_source"),
                 "metrics": brew.get("metrics"),
+                "relay_offset": brew.get("relay_offset"),
+                "first_drop_shot": brew.get("first_drop_shot"),
+                "shot_time": brew.get("shot_time"),
+                "since_last_relay_off": brew.get("since_last_relay_off"),
+                "throttle": brew.get("throttle"),
                 "updated": updated,
             },
         )

@@ -57,9 +57,57 @@
  * brew fades in. Web Animations, cancellable mid-way; instant with reduced
  * motion and when the card appears while active (after the live
  * subscription's snapshot); never in edit mode or the editor.
+ *
+ * Pump throttle (0.6.0): for a brew with a known pump relay start the time
+ * stat shows the shot time (relay on -> end) and the first drop in the
+ * detail line is in shot time too. A brew the throttle followed gets a band
+ * under the chart with the pump power as a step line (0-100 %, dashed when
+ * only observed: what it would have set), a marker at the target shot time
+ * (in profile time: target - relay offset) and "grind finer" under the
+ * time when the shot was predicted too fast. Live and stored alike.
+ *
+ * Pump profiles (0.7.0): the same band shows a profile shot's commanded
+ * power (dashed when only observed); the legend names the profile. The
+ * target time marker only for the Zielzeit profile (its records alone
+ * carry a target time). A profile skipped because the brew was not
+ * prepared ("Prepare brew" off at the relay start) is named under the time
+ * ("<profile> skipped (not prepared): full power").
+ *
+ * 0.7.0b3: the pump line, its hover marker and the legend key in the pump
+ * colour token (--difluid-pump-color, default yellow); the key dashed like
+ * the line when only observed (record "controlled": the pump was not
+ * controlled; older records: observe or not applied); the hover readout
+ * adds the pump power at that time (from the drawn step line), only when
+ * the pump was controlled. No band, key or hover value without a pump
+ * power entity (record "pump"; older records: only applied ones). The target time marker keeps the accent colour. The same file
+ * registers the tile feature "custom:difluid-profile-preview" (below).
+ *
+ * 0.7.0b4: the profile preview has no axis labels: chips over the graph
+ * name what ends each phase (exits, duration; "target weight" at the end),
+ * the phase names under it, fine ticks at the borders, a flow phase's
+ * target flow in its hatched area. Standard shows its power setting as
+ * − value + (fixed 100 %, greyed out, without a pump entity); every view
+ * ends with a Brew Ratio row.
+ *
+ * 0.7.0b5: built-in profiles by id, their names (and the preview's phase
+ * names, sent by the integration) in Home Assistant's language; older
+ * records' German labels shown as the built-in's name. The preview's
+ * target time and pump power inputs are labelled rows like the ratio
+ * row, with more room around the blocks.
+ *
+ * 0.7.0b6: live points from a backlog (frames held back, then delivered at
+ * once) are replaced at their scale time (``replace_from``); the pump
+ * profile of a brew shows in its info line.
+ *
+ * 0.7.0b7: swipe between brews - a quick horizontal flick anywhere on the
+ * card does what "older" (finger to the right) / "newer" do, with the same
+ * locks; a slow drag on the chart stays the hover readout.
+ *
+ * 0.7.0b8: the end-of-list spring only when the navigation was open as the
+ * finger went down (no spring when a brew started or ended meanwhile).
  */
 
-const CARD_VERSION = "0.5.1";
+const CARD_VERSION = "0.7.0";
 const DOMAIN = "difluid_scale";
 
 const STRINGS = {
@@ -110,7 +158,28 @@ const STRINGS = {
     first_drop: "first drop",
     peak_flow: "peak flow",
     target: "target",
-    detail_hint: "Bean · time to first drop · peak flow · mean flow ± variation in the main phase",
+    detail_hint: "Bean · pump profile · time to first drop · peak flow · mean flow ± variation in the main phase",
+    pump_profile: "Pump profile",
+    pump: "Pump",
+    preview_name: "DiFluid pump profile",
+    preview_target_weight: "Target weight",
+    preview_label_time: "Target time",
+    preview_label_power: "Pump power",
+    preview_label_ratio: "Brew Ratio",
+    preview_off: "off",
+    preview_dec_time: "Decrease target shot time",
+    preview_inc_time: "Increase target shot time",
+    preview_dec_power: "Decrease pump power",
+    preview_inc_power: "Increase pump power",
+    preview_dec_ratio: "Decrease Brew Ratio",
+    preview_inc_ratio: "Increase Brew Ratio",
+    grind_finer: "grind finer",
+    profile_skipped: "skipped (not prepared): full power",
+    profile_skipped_no_tare: "skipped (no tare): full power",
+    unreachable_floor: "floor reached",
+    unreachable_rate_limit: "corrections limited",
+    unreachable_late_trigger: "triggered too late",
+    unreachable_trigger_cap: "pump not learned – enable learning",
   },
   de: {
     title: "Espresso",
@@ -159,7 +228,28 @@ const STRINGS = {
     first_drop: "erster Tropfen",
     peak_flow: "Spitzenfluss",
     target: "Ziel",
-    detail_hint: "Bohne · Zeit bis zum ersten Tropfen · Spitzenfluss · mittlerer Fluss ± Schwankung in der Hauptphase",
+    detail_hint: "Bohne · Pumpenprofil · Zeit bis zum ersten Tropfen · Spitzenfluss · mittlerer Fluss ± Schwankung in der Hauptphase",
+    pump_profile: "Pumpenprofil",
+    pump: "Pumpe",
+    preview_name: "DiFluid Pumpenprofil",
+    preview_target_weight: "Zielgewicht",
+    preview_label_time: "Zielzeit",
+    preview_label_power: "Pumpenleistung",
+    preview_label_ratio: "Brew Ratio",
+    preview_off: "aus",
+    preview_dec_time: "Zielzeit verringern",
+    preview_inc_time: "Zielzeit erhöhen",
+    preview_dec_power: "Pumpenleistung verringern",
+    preview_inc_power: "Pumpenleistung erhöhen",
+    preview_dec_ratio: "Brew Ratio verringern",
+    preview_inc_ratio: "Brew Ratio erhöhen",
+    grind_finer: "feiner mahlen",
+    profile_skipped: "übersprungen (nicht vorbereitet): volle Leistung",
+    profile_skipped_no_tare: "übersprungen (nicht tariert): volle Leistung",
+    unreachable_floor: "Untergrenze erreicht",
+    unreachable_rate_limit: "Korrekturen begrenzt",
+    unreachable_late_trigger: "zu spät ausgelöst",
+    unreachable_trigger_cap: "Pumpe nicht gelernt – Lernen einschalten",
   },
 };
 
@@ -200,6 +290,11 @@ const EDITOR_TAGS = new Set([
   "hui-section-edit-mode",
 ]);
 const PAD = { left: 36, right: 40, top: 10, bottom: 24 };
+const BAND_H = 26; // pump power band under the plot (gap + band)
+// Pump power line, its hover marker and legend key: a theme token, yellow
+// by default.
+const PUMP_COLOR = "var(--difluid-pump-color, var(--yellow-color, #fdd835))";
+const BAND_GAP = 6;
 // Live axes start at an espresso-sized range and only grow.
 const LIVE_MIN = { t: 30, f: 3, w: 40 };
 const LIVE_T_STEP = 10; // seconds the time axis extends by
@@ -221,6 +316,33 @@ const FLOW_MIN_POINTS = 3; // fewer points in the window: flow 0
 const TREND_SIGMA = 2.5; // s, Gaussian kernel of the local slope
 const TREND_SPIKE_K = 2; // neighbours on each side for the outlier median
 const TREND_SPIKE_G = 1.0; // g away from that median: outlier frame
+// Swipe between brews (0.7.0b7): a quick, mostly horizontal flick with a
+// finger or pen anywhere on the card (never with a mouse: there dragging
+// reads values or selects text). A slow drag or a hold on the chart stays
+// the hover readout.
+// SWIPE_MIN_PX: well above finger jitter on a tap (~10 px) and about a
+// sixth of a phone-width card, so a readout drag ending in a twitch is no
+// swipe.
+// SWIPE_MIN_SPEED (px/ms) over the last SWIPE_SPEED_MS before lifting the
+// finger: a flick is fast as it leaves the glass (0.8-3 px/ms), even after
+// resting first (70 px in 80 ms = 0.88); a quick readout drag moves evenly
+// at up to ~0.65 px/ms (200 px in 300 ms) and must not switch. 80 ms is a
+// few pointer samples (60-120 Hz) and no more than a flick itself lasts.
+// SWIPE_MAX_MS: a hold longer than this is a readout, whatever follows.
+// SWIPE_RATIO: |dx| > 2 |dy| (within ~27 degrees of horizontal), so a
+// scroll (vertical, handed to the browser by touch-action) never counts.
+const SWIPE_MIN_PX = 60;
+const SWIPE_MIN_SPEED = 0.8;
+const SWIPE_SPEED_MS = 80;
+const SWIPE_MAX_MS = 800;
+const SWIPE_RATIO = 2;
+// Clicks right after a swipe (its pointerup lands on a button) are dropped:
+// a swipe never presses "delete" or "replay".
+const SWIPE_CLICK_GUARD_MS = 400;
+const SWIPE_SLIDE_PX = 24; // the new brew slides in from this far
+const SWIPE_ANIM_MS = 180;
+const SWIPE_BOUNCE_PX = 10; // end of the list: a small spring, no change
+
 const reducedMotion = () =>
   typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -500,6 +622,112 @@ function parseChartHeight(value) {
 }
 
 // Which scale the card shows (websocket target fields), not a brew target.
+// Pump throttle view of a brew: power trace [[t, %]] in profile time, the
+// target shot time in profile time, observe mode, grind-finer hint.
+// ``throttle``: the brew's (or live) throttle record; ``offset``: relay on ->
+// profile t = 0 (s). Null when there is nothing to draw.
+// ``pump``: the power is real (set or read through a configured pump power
+// entity). Without one the trace is an assumption and is not shown: no band,
+// no legend key, no hover value; the target time marker stays.
+function throttleView(throttle, offset) {
+  if (!throttle || !throttle.mode || throttle.mode === "off") return null;
+  const pump = hasPump(throttle);
+  const power = pump && Array.isArray(throttle.power) ? throttle.power : [];
+  const target =
+    throttle.target_time != null && offset != null ? throttle.target_time - offset : null;
+  if (!pump && target == null) return null;
+  if (power.length < 1 && target == null) return null;
+  return {
+    pump,
+    power,
+    targetT: target,
+    observe: observedOnly(throttle),
+    grindFiner: !!throttle.grind_finer,
+    profile: typeof throttle.profile === "string" && throttle.profile ? throttle.profile : null,
+  };
+}
+
+// Whether the power was only observed (dashed line, no hover value): the
+// engine did not control the pump (mode observe, or no usable pump entity).
+// Since 0.7.0b3 the record and the live info say so ("controlled"), the
+// same for a brew live and stored. Older records: mode observe or not
+// applied (a controlled shot that never had to write the pump counts as
+// observed there).
+function observedOnly(throttle) {
+  if (typeof throttle.controlled === "boolean") return !throttle.controlled;
+  return throttle.mode === "observe" || throttle.applied === false;
+}
+
+// Whether a throttle record had a pump power entity. Since 0.7.0b3 the
+// record says so ("pump"). Older records: only a brew whose power was really
+// written ("applied") proves a pump; an observed one may have had none (its
+// trace then is a 100 % assumption), so it shows no band.
+function hasPump(throttle) {
+  if (typeof throttle.pump === "boolean") return throttle.pump;
+  return throttle.applied === true;
+}
+
+// Built-in pump profiles (0.7.0b5): ids, their names (the same as the
+// integration's select state translations; a test keeps them equal) and
+// the German labels they had up to 0.7.0b4 (older records carry those).
+const BUILTIN_PROFILES = {
+  standard: { en: "Standard", de: "Standard" },
+  soft_preinfusion: { en: "Soft preinfusion", de: "Sanfte Vorbrühung" },
+  blooming: { en: "Blooming", de: "Blooming" },
+  allonge: { en: "Allongé", de: "Allongé" },
+  lever: { en: "Lever approximation", de: "Hebel-Annäherung" },
+  target_time: { en: "Target time", de: "Zielzeit" },
+};
+const LEGACY_PROFILES = {
+  "sanfte vorbrühung": "soft_preinfusion",
+  "allongé": "allonge",
+  "hebel-annäherung": "lever",
+  zielzeit: "target_time",
+};
+
+// A profile's name for people: built-ins (by id or old label) in the
+// language, imported ones as they are.
+function profileName(label, language) {
+  const key = String(label).trim().toLowerCase();
+  const id = BUILTIN_PROFILES[key] ? key : LEGACY_PROFILES[key];
+  return id ? BUILTIN_PROFILES[id][language === "de" ? "de" : "en"] : label;
+}
+
+// Text for innerHTML (profile labels are user data).
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+// Step line points for a power trace up to tEnd: each value holds until the
+// next change.
+function powerSteps(power, tEnd) {
+  const out = [];
+  for (let i = 0; i < power.length; i++) {
+    const [t, d] = power[i];
+    if (out.length) out.push([t, out[out.length - 1][1]]);
+    out.push([t, d]);
+  }
+  if (out.length && tEnd != null && tEnd > out[out.length - 1][0]) {
+    out.push([tEnd, out[out.length - 1][1]]);
+  }
+  return out;
+}
+
+// Value of a drawn step line (powerSteps points) at t: the step that holds
+// there (at a change the new value), null outside the drawn line.
+function stepAt(pts, t) {
+  if (!pts.length || t == null) return null;
+  if (t < Math.max(0, pts[0][0]) - 1e-6 || t > pts[pts.length - 1][0] + 1e-6) return null;
+  let v = pts[0][1];
+  for (const p of pts) {
+    if (p[0] <= t + 1e-6) v = p[1];
+    else break;
+  }
+  return v;
+}
+
 function scaleOf(config) {
   const t = {};
   if (config.device_id) t.device_id = config.device_id;
@@ -544,6 +772,8 @@ class DifluidBrewCard extends HTMLElement {
     };
     this._retryTimer = null;
     this._retryCount = 0;
+    this._brewFailed = false; // fetching the shown brew failed (_step): retried
+    this._resyncing = null; // { keepId } of the reconnect reload in flight
     this._conn = null; // connection the last hass object carried
     this._note = null;
     this._noteTimer = null;
@@ -636,6 +866,7 @@ class DifluidBrewCard extends HTMLElement {
       this._cache.clear();
       this._index = 0;
       this._error = null;
+      this._brewFailed = false;
       this._ready = false;
       this._readyDose = null;
       this._setLive(null);
@@ -899,7 +1130,13 @@ class DifluidBrewCard extends HTMLElement {
 
   _retrySucceeded() {
     // Backoff starts over once nothing is failing any more.
-    if (!this._retryTimer && this._unsub && this._liveUnsub && this._brews !== null) {
+    if (
+      !this._retryTimer &&
+      this._unsub &&
+      this._liveUnsub &&
+      this._brews !== null &&
+      !this._brewFailed
+    ) {
       this._retryCount = 0;
     }
   }
@@ -912,10 +1149,12 @@ class DifluidBrewCard extends HTMLElement {
 
   _retry() {
     if (!this.isConnected || !this._hass) return;
-    const failed = !this._unsub || !this._liveUnsub || this._brews === null;
+    const failed =
+      !this._unsub || !this._liveUnsub || this._brews === null || this._brewFailed;
     if (!failed) return;
     this._subscribe();
     if (this._brews === null) this._load();
+    else if (this._brewFailed) this._fetchBrew();
   }
 
   _cancelRetry() {
@@ -958,6 +1197,16 @@ class DifluidBrewCard extends HTMLElement {
       // Start missed (wait for the next subscribe), or a replay is showing.
       if (!this._live || this._live.replay) return;
       const pts = msg.points || [];
+      // 0.7.0b6: frames that came in a backlog (held back, then delivered
+      // at once) were placed back at their scale time: the points from
+      // replace_from on are replaced by this message's points. Live points
+      // are otherwise never changed once drawn.
+      if (msg.replace_from != null) {
+        const live = this._live.points;
+        let cut = live.length;
+        while (cut > 0 && live[cut - 1][0] >= msg.replace_from) cut--;
+        live.splice(cut);
+      }
       for (const p of pts) this._live.points.push(p);
       const phaseChanged = msg.phase !== this._live.phase;
       this._applyLiveValues(msg);
@@ -1025,8 +1274,7 @@ class DifluidBrewCard extends HTMLElement {
         // Missed the end (e.g. websocket reconnect): back to the history.
         this._setLive(null);
         this._index = 0;
-        this._cache.clear();
-        this._load(null);
+        this._resync();
       } else if (resubscribed) {
         this._resync();
       }
@@ -1035,9 +1283,18 @@ class DifluidBrewCard extends HTMLElement {
 
   _resync() {
     // After a reconnect: brews saved or corrected meanwhile were missed.
+    // One reconnect asks twice (the connection's ready event, then the
+    // resubscribed live snapshot): while that reload is in flight a second
+    // one for the same brew would only fetch the same list again.
+    const keepId =
+      (this._index > 0 && this._brews ? this._brews[this._index]?.id : null) || null;
+    if (this._resyncing && this._resyncing.keepId === keepId) return;
     this._cache.clear();
-    const keepId = this._index > 0 && this._brews ? this._brews[this._index]?.id : null;
-    this._load(keepId || null);
+    const run = { keepId };
+    this._resyncing = run;
+    Promise.resolve(this._load(keepId)).finally(() => {
+      if (this._resyncing === run) this._resyncing = null;
+    });
   }
 
   _applyLiveValues(msg) {
@@ -1051,6 +1308,7 @@ class DifluidBrewCard extends HTMLElement {
     l.cut = msg.cut != null ? msg.cut : null;
     // Replay ticks carry no target: the stored brew's one stays.
     if ("target" in msg) l.target = msg.target;
+    if ("throttle" in msg) l.throttle = msg.throttle || null;
     l.recvAt = performance.now();
   }
 
@@ -1095,7 +1353,9 @@ class DifluidBrewCard extends HTMLElement {
     const now = this._liveNow();
     if (now.weight > wMax) wMax = now.weight;
     if (now.flow > fMax) fMax = now.flow;
-    const tSpan = Math.max(tLast, l.elapsed || 0) + 3;
+    const th = l.throttle ? throttleView(l.throttle, l.throttle.relay_offset) : null;
+    const tTarget = th && th.targetT != null ? th.targetT + 1 : 0;
+    const tSpan = Math.max(tLast, l.elapsed || 0, tTarget) + 3;
     const tNeed = Math.max(LIVE_MIN.t, Math.ceil(tSpan / LIVE_T_STEP) * LIVE_T_STEP);
     const fNeed = axis(fMax * 1.1, LIVE_MIN.f, 4).max;
     const wNeed = axis(wMax * 1.05, LIVE_MIN.w, 4).max;
@@ -1121,6 +1381,9 @@ class DifluidBrewCard extends HTMLElement {
     this._pending = { stats: false, chart: false };
     if (!this._live) return;
     if (stats) this._renderLiveStats();
+    // The live throttle info (pump key, observed or applied) can arrive or
+    // change after the brew start: the legend follows without a full render.
+    if (this._pumpKey() !== this._legendPumpKey) this._renderLegend();
     let animating = this._advanceReveal();
     const axes = this._liveAxes;
     if (axes) {
@@ -1417,6 +1680,7 @@ class DifluidBrewCard extends HTMLElement {
       if (token !== this._loadToken) return;
       this._brews = res.brews || [];
       this._error = null;
+      this._brewFailed = false;
       this._retrySucceeded();
       const idx = keepId ? this._brews.findIndex((b) => b.id === keepId) : 0;
       this._index = idx > 0 ? idx : 0;
@@ -1443,6 +1707,168 @@ class DifluidBrewCard extends HTMLElement {
     if (res.brew) this._cache.set(summary.id, res.brew);
   }
 
+  // Whether the "older" (delta 1) / "newer" (-1) button can be used right
+  // now: shown (not live, ready, replaying, no message, no confirmation
+  // open) and enabled (not at the end of the list). The swipe uses the same.
+  _navUsable(delta) {
+    if (!this._navOpen()) return false;
+    const btn = delta > 0 ? this._els.prev : this._els.next;
+    return !!btn && !btn.disabled;
+  }
+
+  // The navigation is shown at all (stored brews, no live/ready view, no
+  // replay, no message, no confirmation open); a button may still be
+  // disabled at the end of the list.
+  _navOpen() {
+    const e = this._els;
+    if (!e || !this._brews || !this._brews.length) return false;
+    if (this._live || this._readyView() || this._confirm) return false;
+    return !(e.nav.classList.contains("hidden") || e.nav.classList.contains("replaying"));
+  }
+
+  // The buttons' path (and the swipe's): one step if the button is usable.
+  _navStep(delta) {
+    if (!this._navUsable(delta)) return false;
+    this._step(delta);
+    return true;
+  }
+
+  // --------------------------------------------------------------- swipe
+
+  // Swipe between brews (0.7.0b7), anywhere on the card.
+  _wireSwipe(card) {
+    card.addEventListener("pointerdown", (ev) => this._swipeStart(ev));
+    card.addEventListener("pointermove", (ev) => this._swipeMove(ev));
+    card.addEventListener("pointerup", (ev) => this._swipeEnd(ev));
+    card.addEventListener("pointercancel", () => { this._swipe = null; });
+    // Capture: a click from a swipe's pointerup never reaches a button.
+    card.addEventListener("click", (ev) => this._swipeClickGuard(ev), true);
+  }
+
+  _swipeStart(ev) {
+    // Touch and pen only; a second finger (pinch) ends a running swipe.
+    if (!ev.isPrimary || ev.pointerType === "mouse") {
+      this._swipe = null;
+      return;
+    }
+    this._swipe = {
+      id: ev.pointerId,
+      x: ev.clientX,
+      y: ev.clientY,
+      t: ev.timeStamp,
+      samples: [[ev.timeStamp, ev.clientX]],
+      // The buttons' locks as the finger went down: a brew that starts
+      // (or ends) meanwhile does not make the card jump.
+      usable: { 1: this._navUsable(1), [-1]: this._navUsable(-1) },
+      open: this._navOpen(),
+    };
+  }
+
+  _swipeMove(ev) {
+    const s = this._swipe;
+    if (!s || ev.pointerId !== s.id) return;
+    s.samples.push([ev.timeStamp, ev.clientX]);
+    // Keep only what the end speed needs (and one sample before it).
+    const from = ev.timeStamp - SWIPE_SPEED_MS;
+    while (s.samples.length > 2 && s.samples[1][0] <= from) s.samples.shift();
+  }
+
+  // Speed (px/ms) over the last SWIPE_SPEED_MS up to (t, x): from the
+  // newest sample at or before that window's start.
+  static _endSpeed(samples, t, x) {
+    const from = t - SWIPE_SPEED_MS;
+    let ref = samples[0];
+    for (const smp of samples) {
+      if (smp[0] <= from) ref = smp;
+    }
+    return Math.abs(x - ref[1]) / Math.max(1, t - ref[0]);
+  }
+
+  // Classify the gesture at pointerup: a swipe needs distance, speed, a
+  // short duration and a mostly horizontal direction (constants above).
+  // Returns the step made (1 older, -1 newer), 0 for a swipe without a
+  // step, null for no swipe.
+  _swipeEnd(ev) {
+    const s = this._swipe;
+    this._swipe = null;
+    if (!s || ev.pointerId !== s.id) return null;
+    const dx = ev.clientX - s.x;
+    const dy = ev.clientY - s.y;
+    const dt = Math.max(1, ev.timeStamp - s.t);
+    const swipe =
+      Math.abs(dx) >= SWIPE_MIN_PX &&
+      Math.abs(dx) > SWIPE_RATIO * Math.abs(dy) &&
+      dt <= SWIPE_MAX_MS &&
+      DifluidBrewCard._endSpeed(s.samples, ev.timeStamp, ev.clientX) >= SWIPE_MIN_SPEED;
+    if (!swipe) return null;
+    this._swipedAt = ev.timeStamp;
+    // Finger to the right = the older brew (as the "older" button).
+    const dir = dx > 0 ? 1 : -1;
+    // Usable when the finger went down and still now.
+    const moved = s.usable[dir] ? this._navStep(dir) : false;
+    if (moved) {
+      this._swipeSlide(dir);
+      return dir;
+    }
+    // No step (end of the list, live, ...): no readout left frozen by the
+    // swipe's pointermoves; at the end of the list a small spring.
+    if (this._hover) {
+      this._hover = null;
+      this._renderChart();
+      this._renderLegend();
+    }
+    // A spring only at the end of the list: the navigation was open when
+    // the finger went down (and still is), this direction only blocked by
+    // the list's end - not by a brew that started or ended meanwhile.
+    if (s.open && !s.usable[dir] && this._navOpen()) this._swipeBounce(dir);
+    return 0;
+  }
+
+  _swipeClickGuard(ev) {
+    if (this._swipedAt != null && ev.timeStamp - this._swipedAt <= SWIPE_CLICK_GUARD_MS) {
+      ev.stopPropagation();
+      ev.preventDefault();
+    }
+  }
+
+  // The content a swipe moves: header, stats, legend, chart.
+  _swipeTargets() {
+    return [this._head, this._els.stats, this._els.legend, this._chartBox].filter(
+      (el) => el && typeof el.animate === "function"
+    );
+  }
+
+  // An expand/collapse animation still runs on the content (e.g. the
+  // fade-in after a live brew collapsed): no swipe animation on top.
+  _contentAnimating() {
+    return (this._anims.content || []).some((a) => a && a.playState === "running");
+  }
+
+  // New brew: slides in from the side the finger came from.
+  _swipeSlide(dir) {
+    if (reducedMotion() || this._contentAnimating()) return;
+    const frames = [
+      { transform: `translateX(${-dir * SWIPE_SLIDE_PX}px)`, opacity: 0.4 },
+      { transform: "none", opacity: 1 },
+    ];
+    for (const el of this._swipeTargets()) {
+      el.animate(frames, { duration: SWIPE_ANIM_MS, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+    }
+  }
+
+  // End of the list: a small spring in the swipe's direction, no change.
+  _swipeBounce(dir) {
+    if (reducedMotion() || this._contentAnimating()) return;
+    const frames = [
+      { transform: "none" },
+      { transform: `translateX(${dir * SWIPE_BOUNCE_PX}px)` },
+      { transform: "none" },
+    ];
+    for (const el of this._swipeTargets()) {
+      el.animate(frames, { duration: SWIPE_ANIM_MS + 60, easing: "ease-out" });
+    }
+  }
+
   async _step(delta) {
     if (!this._brews) return;
     const next = this._index + delta;
@@ -1450,10 +1876,32 @@ class DifluidBrewCard extends HTMLElement {
     this._index = next;
     this._hover = null;
     this._render();
+    await this._fetchBrew();
+  }
+
+  // The shown brew's profile (after a step, or retried after it failed).
+  // A failure shows the error (which hides the navigation), so it is
+  // retried with the subscribe/load backoff until the brew arrives; the
+  // list and the position are kept.
+  async _fetchBrew() {
+    const token = this._loadToken;
+    const index = this._index;
     try {
       await this._ensureBrew();
     } catch (err) {
+      // A reload or another step since then owns the card now.
+      if (token !== this._loadToken || index !== this._index) return;
       this._error = (err && err.message) || this._t("error");
+      this._brewFailed = true;
+      this._scheduleRetry();
+      this._render();
+      return;
+    }
+    if (token !== this._loadToken || index !== this._index) return;
+    if (this._brewFailed) {
+      this._brewFailed = false;
+      this._error = null;
+      this._retrySucceeded();
     }
     this._render();
   }
@@ -1820,12 +2268,13 @@ class DifluidBrewCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; }
-        ha-card { height: 100%; box-sizing: border-box; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+        ha-card { height: 100%; box-sizing: border-box; padding: 16px; display: flex; flex-direction: column; gap: 12px; touch-action: pan-y pinch-zoom; }
         .head { display: flex; align-items: center; gap: 8px; }
         .titles { flex: 1; min-width: 0; }
         .title { font-size: 1.1rem; font-weight: 500; color: var(--primary-text-color); line-height: 1.3; }
         .when { font-size: 0.85rem; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .detail { font-size: 0.75rem; line-height: 1.3; min-height: 1.3em; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+        .detail { font-size: 0.75rem; line-height: 1.3; min-height: 1.3em; height: 1.3em; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+        .detail .brew-profile { display: inline-block; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; }
         .invisible { visibility: hidden; }
         .nav { display: flex; align-items: center; gap: 2px; color: var(--secondary-text-color); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
         button { all: unset; cursor: pointer; width: 36px; height: 36px; display: grid; place-items: center; border-radius: 50%; color: var(--primary-text-color); }
@@ -1838,15 +2287,21 @@ class DifluidBrewCard extends HTMLElement {
         .stat .value { font-size: 1.35rem; color: var(--primary-text-color); font-variant-numeric: tabular-nums; white-space: nowrap; }
         .stat .unit { font-size: 0.85rem; color: var(--secondary-text-color); margin-left: 2px; }
         .stat-note { font-size: 0.7rem; line-height: 1.3; min-height: 1.3em; color: var(--secondary-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .legend { display: flex; gap: 16px; font-size: 0.8rem; color: var(--secondary-text-color); align-items: center; min-height: 1.2em; }
-        .legend .key { display: inline-flex; align-items: center; gap: 6px; }
-        .legend .swatch { width: 14px; height: 0; border-top: 2px solid; }
+        /* One row that never wraps (the chart height counts it): on a narrow
+           card long keys (a profile name) shrink with an ellipsis instead of
+           overflowing the card. */
+        .legend { display: flex; gap: 16px; font-size: 0.8rem; color: var(--secondary-text-color); align-items: center; min-height: 1.2em; min-width: 0; overflow: hidden; white-space: nowrap; }
+        .legend .key { display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; min-width: 0; }
+        .legend .key-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .legend .swatch { width: 14px; height: 0; border-top: 2px solid; flex: none; }
         .legend .flow .swatch { border-color: var(--primary-color); }
         .legend .trend .swatch { border-color: var(--primary-color); border-top-style: dotted; }
         .legend .weight .swatch { border-color: var(--secondary-text-color); border-top-style: dashed; }
-        .legend .readout { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--primary-text-color); }
+        .legend .pump .swatch { border-color: ${PUMP_COLOR}; }
+        .legend .pump.observe .swatch { border-top-style: dashed; }
+        .legend .readout { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--primary-text-color); }
         .chart { position: relative; height: ${CHART_HEIGHT}px; touch-action: pan-y; }
-        .chart svg { display: block; overflow: visible; }
+        .chart svg { display: block; overflow: visible; pointer-events: none; }
         .message { color: var(--secondary-text-color); padding: 24px 0; text-align: center; }
         .title { display: flex; align-items: center; gap: 8px; }
         .nav.replaying .prev, .nav.replaying .next, .nav.replaying .pos { display: none; }
@@ -1943,8 +2398,9 @@ class DifluidBrewCard extends HTMLElement {
     this._head = $(".head");
     this._applyChartHeight(this._chartH);
     // Brews are newest first: "older" moves up the list.
-    this._els.prev.addEventListener("click", () => this._step(1));
-    this._els.next.addEventListener("click", () => this._step(-1));
+    this._els.prev.addEventListener("click", () => this._navStep(1));
+    this._els.next.addEventListener("click", () => this._navStep(-1));
+    this._wireSwipe(this._card);
     this._els.replay.addEventListener("click", () => this._toggleReplay());
     this._els.del.addEventListener("click", () => this._askDelete());
     this._els.confirmCancel.addEventListener("click", () => this._cancelDelete());
@@ -2003,7 +2459,13 @@ class DifluidBrewCard extends HTMLElement {
       if (this._confirm && !this._confirm.busy) this._confirm = null;
       e.confirm.classList.add("hidden");
       // Space kept (not hidden): the header does not jump at the brew end.
-      e.detail.classList.add("invisible");
+      // A running brew shows its pump profile there (0.7.0b6).
+      const l = this._live;
+      const shown = l && l.replay ? (this._brews || [])[this._index] : null;
+      const liveProfile = l ? this._profileHtml(shown ? shown.throttle : l.throttle) : "";
+      e.detail.innerHTML = liveProfile;
+      e.detail.title = liveProfile ? this._t("pump_profile") : "";
+      e.detail.classList.toggle("invisible", !liveProfile);
       e.message.classList.add("hidden");
       // A real live brew has no navigation; a replay keeps its stop button.
       e.nav.classList.toggle("hidden", !replaying);
@@ -2050,8 +2512,8 @@ class DifluidBrewCard extends HTMLElement {
       minute: "2-digit",
     });
 
-    const detail = this._detailText(summary);
-    e.detail.textContent = detail;
+    const detail = this._detailHtml(summary);
+    e.detail.innerHTML = detail;
     e.detail.title = this._t("detail_hint");
     e.detail.classList.toggle("invisible", !detail);
 
@@ -2072,10 +2534,45 @@ class DifluidBrewCard extends HTMLElement {
       ) +
       stat(this._t("yield"), this._fmt(summary.yield, 1), "g", this._targetText(summary.target)) +
       stat(this._t("ratio"), ratio, "") +
-      stat(this._t("time"), this._fmt(summary.duration, 1), "s");
+      stat(
+        this._t("time"),
+        this._fmt(summary.shot_time != null ? summary.shot_time : summary.duration, 1),
+        "s",
+        this._timeNote(summary.throttle)
+      );
 
     this._renderLegend();
     this._renderChart();
+  }
+
+  // Under the time: "grind finer" for a shot the throttle found too fast.
+  // With the reason when the target time was not reached.
+  _timeNote(throttle) {
+    // A pump profile that did not run: "Prepare brew" was off at the relay
+    // start. Brews stored before 0.7.0b2 carry the old gate "no_tare"; they
+    // keep their own text, which is what really happened to them.
+    const reason = throttle && throttle.profile ? throttle.profile_reason : null;
+    const skipped = reason === "not_prepared"
+      ? "profile_skipped"
+      : reason === "no_tare" ? "profile_skipped_no_tare" : null;
+    if (skipped) return `${escapeHtml(profileName(throttle.profile, lang(this._hass)))} ${this._t(skipped)}`;
+    if (!throttle || !throttle.grind_finer) return "";
+    const why = throttle.unreachable && throttle.unreachable_reason
+      ? this._t(`unreachable_${throttle.unreachable_reason}`)
+      : "";
+    return why ? `${this._t("grind_finer")} · ${why}` : this._t("grind_finer");
+  }
+
+  // Throttle view of what the chart shows (live or stored), or null.
+  _chartThrottle() {
+    if (this._readyView()) return null;
+    if (this._live) {
+      const th = this._live.throttle;
+      return th ? throttleView(th, th.relay_offset) : null;
+    }
+    const summary = this._brews && this._brews[this._index];
+    if (!summary) return null;
+    return throttleView(summary.throttle, summary.relay_offset);
   }
 
   // "target 40.0 g" for a target in grams; "" without one.
@@ -2084,18 +2581,40 @@ class DifluidBrewCard extends HTMLElement {
     return `${this._t("target")} ${this._fmt(target, 1)} g`;
   }
 
-  // Bean and shot metrics of a stored brew, "" when there is nothing.
-  _detailText(summary) {
+  // The pump profile a brew ran with (0.7.0b6, its throttle record's
+  // profile), as HTML: a span of its own so a long name is cut by an
+  // ellipsis without pushing the rest out. "" for records without one
+  // (before 0.7.0) - never a made-up "Standard".
+  _profileHtml(throttle) {
+    const label = throttle && throttle.profile;
+    if (label == null || String(label).trim() === "") return "";
+    const name = escapeHtml(profileName(label, lang(this._hass)));
+    return `<span class="brew-profile" title="${name}">${name}</span>`;
+  }
+
+  // Bean, pump profile and shot metrics of a stored brew as HTML (user
+  // data escaped), "" when there is nothing.
+  _detailHtml(summary) {
+    const parts = this._detailParts(summary).map((p) => escapeHtml(p));
+    const profile = this._profileHtml(summary.throttle);
+    if (profile) parts.splice(summary.bean ? 1 : 0, 0, profile);
+    return parts.join(" · ");
+  }
+
+  // Bean and shot metrics of a stored brew (plain text parts).
+  _detailParts(summary) {
     const parts = [];
     if (summary.bean) parts.push(summary.bean);
     const m = summary.metrics || {};
-    if (m.first_drop != null) parts.push(`${this._t("first_drop")} ${this._fmt(m.first_drop, 1)} s`);
+    // In shot time (relay on) when known, else from the scale timer start.
+    const drop = summary.first_drop_shot != null ? summary.first_drop_shot : m.first_drop;
+    if (drop != null) parts.push(`${this._t("first_drop")} ${this._fmt(drop, 1)} s`);
     if (m.peak_flow != null) parts.push(`${this._t("peak_flow")} ${this._fmt(m.peak_flow, 1)} g/s`);
     if (m.mean_flow != null) {
       const cv = m.flow_cv != null ? ` ±${this._fmt(m.flow_cv * 100, 0)} %` : "";
       parts.push(`Ø ${this._fmt(m.mean_flow, 1)} g/s${cv}`);
     }
-    return parts.join(" · ");
+    return parts;
   }
 
   _renderLiveStats() {
@@ -2127,8 +2646,11 @@ class DifluidBrewCard extends HTMLElement {
         <div class="value">${value}${unit ? `<span class="unit">${unit}</span>` : ""}</div>
         <div class="stat-note">${note || ""}</div>
       </div>`;
+    // Shot time (from the pump relay) once the relay start is known.
+    const th = l ? l.throttle : null;
+    const offset = th && th.relay_offset != null ? th.relay_offset : 0;
     const html =
-      stat("big", this._t("time"), this._fmt(elapsed, 1), "s") +
+      stat("big", this._t("time"), this._fmt(elapsed + offset, 1), "s", this._timeNote(th)) +
       stat("big flow", this._t("flow_rate"), this._fmt(now.flow, 1), "g/s") +
       stat("big", this._t("weight"), this._fmt(now.weight, 1), "g", this._targetText(target)) +
       stat("", this._t("dose"), this._fmt(dose, 1), dose == null ? "" : "g");
@@ -2147,20 +2669,58 @@ class DifluidBrewCard extends HTMLElement {
       const [t, w, f] = this._hover;
       const tp = trendAt(trend, t);
       const smooth = tp ? ` (Ø ${this._fmt(tp[1], 1)})` : "";
-      readout = `${this._fmt(t, 1)} s · ${this._fmt(f, 1)} g/s${smooth} · ${this._fmt(w, 1)} g`;
+      const pump = this._pumpAt(t);
+      const pumpText = pump != null ? ` · ${this._t("pump")} ${this._fmt(pump, 0)} %` : "";
+      readout = `${this._fmt(t, 1)} s · ${this._fmt(f, 1)} g/s${smooth} · ${this._fmt(w, 1)} g${pumpText}`;
     }
     const trendKey = trend.length
-      ? `<span class="key trend"><span class="swatch"></span>${this._t("trend")}</span>`
+      ? `<span class="key trend"><span class="swatch"></span><span class="key-text">${this._t("trend")}</span></span>`
       : "";
     // A picked point replaces the keys, so the row never wraps on a phone
     // (the chart height counts the legend and would jump).
+    this._legendPumpKey = this._pumpKey();
     e.legend.innerHTML = readout
       ? `<span class="readout">${readout}</span>`
       : `
-      <span class="key flow"><span class="swatch"></span>${this._t("flow")} (g/s)</span>
+      <span class="key flow"><span class="swatch"></span><span class="key-text">${this._t("flow")} (g/s)</span></span>
       ${trendKey}
-      <span class="key weight"><span class="swatch"></span>${this._t("weight")} (g)</span>
+      <span class="key weight"><span class="swatch"></span><span class="key-text">${this._t("weight")} (g)</span></span>
+      ${this._legendPumpKey}
       <span class="readout"></span>`;
+  }
+
+  // Legend key of the pump band: "Pump (%)", with the profile's name; its
+  // swatch dashed like the line when the power was only observed.
+  _pumpKey() {
+    const view = this._chartThrottle();
+    if (!view || !view.pump) return "";
+    const name = view.profile
+      ? ` · <span class="profile-name">${escapeHtml(profileName(view.profile, lang(this._hass)))}</span>`
+      : "";
+    const cls = view.observe ? "key pump observe" : "key pump";
+    return `<span class="${cls}"><span class="swatch"></span><span class="key-text">${this._t("pump")} (%)${name}</span></span>`;
+  }
+
+  // Drawn pump power step line of the chart's brew (profile time, like the
+  // flow points), [] when there is none. ``g``: geometry; ``tLast``: the
+  // newest drawn point (the end without a timer stop).
+  _pumpSteps(view, brew, g, tLast) {
+    if (!view || !view.pump || !g.band || !view.power.length) return [];
+    let tEnd = brew.duration != null ? brew.duration : tLast;
+    if (tEnd == null || tEnd > g.tMax) tEnd = g.tMax;
+    return powerSteps(view.power, tEnd).filter((p) => p[0] <= g.tMax + 1e-6);
+  }
+
+  // Pump power (%) at chart time t as drawn; null without a pump band and
+  // when the power was only observed (not set: no value to read).
+  _pumpAt(t) {
+    const view = this._chartThrottle();
+    if (!view || !view.pump || view.observe || !view.power.length) return null;
+    const brew = this._chartBrew();
+    if (!brew) return null;
+    const g = this._geometry(brew);
+    const pts = g.pts;
+    return stepAt(this._pumpSteps(view, brew, g, pts.length ? pts[pts.length - 1][0] : null), t);
   }
 
   _currentBrew() {
@@ -2219,15 +2779,22 @@ class DifluidBrewCard extends HTMLElement {
         if (p[1] > wPeak) wPeak = p[1];
       }
       for (const p of brew.trend || []) if (p[1] > fPeak) fPeak = p[1];
-      tAxis = axis(pts.length ? pts[pts.length - 1][0] : 0, 5, tCount);
+      // The axis reaches the target shot time marker too (a shot that
+      // ended early still shows where it should have ended).
+      const view = this._chartThrottle();
+      const tTarget = view && view.targetT != null ? view.targetT + 1 : 0;
+      tAxis = axis(Math.max(pts.length ? pts[pts.length - 1][0] : 0, tTarget), 5, tCount);
       fAxis = axis(fPeak, 1, 4);
       wAxis = axis(wPeak, 10, 4);
       tMax = tAxis.max;
       fMax = fAxis.max;
       wMax = wAxis.max;
     }
-    const plotH = this._chartH - PAD.top - PAD.bottom;
+    const th = this._chartThrottle();
+    const band = th && th.pump ? BAND_H : 0;
+    const plotH = this._chartH - PAD.top - PAD.bottom - band;
     return {
+      band,
       pts,
       width,
       tAxis,
@@ -2313,6 +2880,7 @@ class DifluidBrewCard extends HTMLElement {
 
     const base = PAD.top + g.plotH;
     if (!g.pts.length) {
+      this._renderThrottle(svg, g, brew, null);
       box.appendChild(svg);
       return;
     }
@@ -2364,6 +2932,7 @@ class DifluidBrewCard extends HTMLElement {
       );
     }
 
+    this._renderThrottle(svg, g, brew, last[0]);
     if (brew.live) {
       // "Now" marker at the newest flow point.
       svg.appendChild(
@@ -2415,8 +2984,90 @@ class DifluidBrewCard extends HTMLElement {
           svgEl("circle", { cx: xh, cy: g.yF(tp[1]), r: 3, fill: "var(--primary-color)" })
         );
       }
+      const pump = this._pumpAt(t);
+      if (pump != null) {
+        svg.appendChild(
+          svgEl("circle", {
+            cx: xh,
+            cy: this._bandY(g)(pump),
+            r: 3,
+            fill: PUMP_COLOR,
+            "data-role": "pump-hover",
+          })
+        );
+      }
     }
     box.appendChild(svg);
+  }
+
+  // Pump power band (step line, 0-100 %) under the plot and the target
+  // shot time marker. Colours from theme variables only.
+  _renderThrottle(svg, g, brew, tLast) {
+    const view = this._chartThrottle();
+    if (!view) return;
+    const accent = "var(--accent-color, var(--primary-text-color))";
+    if (view.targetT != null && view.targetT > 0 && view.targetT <= g.tMax) {
+      const xt = g.x(view.targetT);
+      svg.appendChild(
+        svgEl("line", {
+          x1: xt,
+          x2: xt,
+          y1: PAD.top,
+          y2: PAD.top + g.plotH + (g.band ? g.band - 2 : 0),
+          stroke: accent,
+          "stroke-width": 1,
+          "stroke-dasharray": "6 3",
+          opacity: 0.8,
+          "data-role": "target-time",
+        })
+      );
+    }
+    if (!g.band) return;
+    const top = PAD.top + g.plotH + BAND_GAP;
+    const h = g.band - BAND_GAP - 2;
+    const yP = this._bandY(g);
+    svg.appendChild(
+      svgEl("line", {
+        x1: PAD.left,
+        x2: PAD.left + g.plotW,
+        y1: top + h,
+        y2: top + h,
+        stroke: "var(--divider-color)",
+        "stroke-width": 1,
+      })
+    );
+    const label = svgEl("text", {
+      x: PAD.left + g.plotW + 6,
+      y: top + 8,
+      "text-anchor": "start",
+      "font-size": 9,
+      fill: "var(--secondary-text-color)",
+    });
+    label.textContent = "100%";
+    svg.appendChild(label);
+    const pts = this._pumpSteps(view, brew, g, tLast);
+    if (!pts.length) return;
+    const d = pts
+      .map((p, i) => `${i ? "L" : "M"}${g.x(Math.max(0, p[0])).toFixed(1)},${yP(p[1]).toFixed(1)}`)
+      .join("");
+    svg.appendChild(
+      svgEl("path", {
+        d,
+        fill: "none",
+        stroke: PUMP_COLOR,
+        "stroke-width": 1.5,
+        "stroke-dasharray": view.observe ? "3 3" : "none",
+        "stroke-linejoin": "round",
+        "data-role": "pump-power",
+      })
+    );
+  }
+
+  // y of a pump power (0-100 %) in the band.
+  _bandY(g) {
+    const top = PAD.top + g.plotH + BAND_GAP;
+    const h = g.band - BAND_GAP - 2;
+    return (d) => top + h - (Math.max(0, Math.min(100, d)) / 100) * h;
   }
 
   _onPointer(ev) {
@@ -2504,14 +3155,762 @@ class DifluidBrewCardEditor extends HTMLElement {
   }
 }
 
+// ------------------------------------------------- profile preview feature
+//
+// Tile feature "custom:difluid-profile-preview" (0.7.0b3) for the pump
+// profile select of this integration: the selected profile's pump power
+// course as a small graph; for the adaptive throttle profile (x_throttle
+// "target_time", the built-in Zielzeit) the target shot time number of the
+// same scale as − value + buttons instead. The definition comes from the
+// websocket command difluid_scale/profile (built-in and imported alike).
+
+// A last phase whose cap is longer than this runs "until the shot ends"
+// (built-ins: 120 s, longer than any espresso; the auto-stop ends it).
+const PREVIEW_OPEN_PHASE = 60; // s
+const PREVIEW_SAMPLES = 12; // points per eased transition
+const PREVIEW_TAIL_MIN = 4; // s, open end drawn after the defined part
+const PREVIEW_TAIL_SHARE = 0.25; // of the defined part
+// Layout (px): end criteria chips over the graph, the graph, the phase
+// names under it; the brew ratio row under everything.
+const PREVIEW_CHIP_H = 14;
+const PREVIEW_GRAPH_H = 36;
+const PREVIEW_NAMES_H = 12;
+const PREVIEW_LABEL_PAD = 2; // px between neighbouring names
+const PREVIEW_LABEL_MIN = 20; // px: narrower sections get no name (< ~3 characters)
+const PREVIEW_CHAR_W = 5.6; // px, estimated mean character width at 10 px
+const PREVIEW_CHIP_PAD = 12; // px, a chip's horizontal padding (both sides)
+const PREVIEW_CHIP_GAP = 3; // px, at least between two chips
+const PREVIEW_RATIO_W = 156; // px, a compact − value + input
+const PREVIEW_ROW_H = 32; // px, a labelled input row
+const PREVIEW_TOP = 4; // px over the tile's feature gap (12): room under the dropdown
+const PREVIEW_BLOCK_GAP = 16; // px between the graph (or the main row) and the ratio row
+const PREVIEW_RETRY_MS = 10000; // first retry after a failed fetch
+const PREVIEW_RETRY_MAX_MS = 300000; // longest pause between retries
+
+// Transition curve 0..1 -> 0..1 (profiles.ease).
+function previewEase(kind, x) {
+  x = Math.min(1, Math.max(0, x));
+  if (kind === "ease-in") return x * x;
+  if (kind === "ease-out") return 1 - (1 - x) ** 2;
+  if (kind === "ease-in-out") return 3 * x * x - 2 * x * x * x;
+  if (kind === "linear") return x;
+  return 1;
+}
+
+// Power as the engine sets it: 0 stays 0 (a bloom), anything else in
+// [floor, 100] (ProfileRun._clamp/quantize; the pump's own grid is unknown
+// here, so 1 % steps).
+function previewPower(value, floor) {
+  if (value <= 0) return 0;
+  return Math.min(100, Math.max(floor, value));
+}
+
+// Profile definition (websocket difluid_scale/profile) -> what the feature
+// shows. {kind: "target"} for the adaptive throttle profile; null without
+// phases; else {kind: "graph", segments, phases, defined, tMax}. Segments:
+// {type: "line", pts: [[t, %]], dashed, fade} or {type: "open", t0, t1,
+// fade} (a range where the power is not fixed: 0-100 % open). Rules (what
+// the engine does, nothing invented):
+// - phases in order, each from the power at its start; transitions sampled
+//   with their curve, cut at the phase end;
+// - a phase with exit targets (weight/flow/ratio) may end before its cap:
+//   drawn to its cap, dashed;
+// - a flow phase: the controller sets the power live: an open range over
+//   the full height; a transition starting after it starts from an unknown
+//   power: open as well until it ends;
+// - the last phase with a cap over PREVIEW_OPEN_PHASE runs until the shot
+//   ends: drawn to the end of its transition, then an open end that fades
+//   out (schematic length, not a time); after a shorter last phase the
+//   pump goes back to 100 %, also as an open end.
+// ``defined``: where the defined part ends (s; the open end follows);
+// ``phases``: [{name, t0, t1}] per profile phase, for the labels on the
+// x axis. A phase includes its own transition (the engine runs a phase's
+// transition from the phase start: ProfileRun._transition); the open last
+// phase runs to the end of the drawing; the return to 100 % after a short
+// last phase is no phase (not in the list). ``targets`` (exit targets)
+// and ``duration`` (s; null for the open last phase): its end criteria;
+// ``open``: the last phase runs until the shot ends. Open segments of a
+// flow phase carry its target ``flow`` (g/s).
+function profilePreview(profile, floor) {
+  if (!profile || !Array.isArray(profile.phases) || !profile.phases.length) return null;
+  if (profile.throttle === "target_time") return { kind: "target" };
+  const fl = Number.isFinite(floor) ? floor : 0;
+  const segments = [];
+  let t = 0;
+  let prev = 100; // the engine's start power; null: unknown (after a flow phase)
+  let tail = null; // {type: "line", value} | {type: "open"}
+  const phases = profile.phases;
+  const labels = [];
+  for (let i = 0; i < phases.length; i++) {
+    const ph = phases[i];
+    const last = i === phases.length - 1;
+    const isFlow = ph.flow != null;
+    const hasTargets = Array.isArray(ph.targets) && ph.targets.length > 0;
+    const open = last && ph.duration > PREVIEW_OPEN_PHASE;
+    const span = open ? null : Number(ph.duration);
+    labels.push({
+      name: typeof ph.name === "string" && ph.name.trim() ? ph.name.trim() : `Phase ${i + 1}`,
+      t0: t,
+      t1: open ? null : t + span, // null: to the end of the drawing
+      // End criteria (ProfileRun._exit): the exit targets, whichever is
+      // met first, and the duration, a maximum beside targets. The open
+      // last phase's cap is no criterion (it runs until the shot ends).
+      targets: hasTargets ? ph.targets.map((tg) => ({ ...tg })) : [],
+      duration: open ? null : Number(ph.duration),
+      open, // runs until the shot ends (at the target weight)
+      flow: isFlow ? Number(ph.flow) : null, // a flow phase's target (g/s)
+    });
+    if (isFlow) {
+      if (open) {
+        tail = { type: "open", flow: ph.flow };
+      } else {
+        segments.push({ type: "open", t0: t, t1: t + span, fade: false, dashed: hasTargets, flow: ph.flow });
+        t += span;
+        if (last) tail = { type: "line", value: 100 };
+      }
+      prev = null;
+      continue;
+    }
+    const goal = previewPower(Number(ph.power), fl);
+    const td = ph.transition === "instant" || !ph.transition ? 0 : Number(ph.transition_duration) || 0;
+    const tdEff = span == null ? td : Math.min(td, span);
+    let pts;
+    if (prev == null) {
+      // From an unknown power: open until the transition's end.
+      if (tdEff > 0) {
+        segments.push({ type: "open", t0: t, t1: t + tdEff, fade: false, dashed: false });
+      }
+      const v = tdEff > 0 && tdEff < td ? null : goal; // cut transition: still unknown
+      pts = v == null ? null : [[t + tdEff, v]];
+    } else {
+      pts = [[t, prev]];
+      if (tdEff > 0) {
+        for (let k = 1; k <= PREVIEW_SAMPLES; k++) {
+          const x = (k / PREVIEW_SAMPLES) * tdEff;
+          const v = prev + (goal - prev) * previewEase(ph.transition, x / td);
+          pts.push([t + x, previewPower(v, fl)]);
+        }
+      } else {
+        pts.push([t, goal]);
+      }
+    }
+    const value = pts ? pts[pts.length - 1][1] : null;
+    if (open) {
+      t += tdEff;
+      tail = value == null ? { type: "open" } : { type: "line", value };
+    } else {
+      t += span;
+      // (Without pts the transition from an unknown power fills the
+      // whole phase: already open.)
+      if (pts) pts.push([t, value]);
+      if (last) tail = { type: "line", value: 100 };
+    }
+    if (pts && (pts[pts.length - 1][0] > pts[0][0] || pts.some((p) => p[1] !== pts[0][1]))) {
+      segments.push({ type: "line", pts, dashed: hasTargets, fade: false });
+    }
+    prev = value;
+  }
+  const defined = t;
+  const len = Math.max(PREVIEW_TAIL_MIN, defined * PREVIEW_TAIL_SHARE);
+  if (tail.type === "open") {
+    segments.push({ type: "open", t0: defined, t1: defined + len, fade: true, dashed: false, flow: tail.flow ?? null });
+  } else {
+    const from = prev == null ? tail.value : prev;
+    segments.push({
+      type: "line",
+      pts: [[defined, from], [defined, tail.value], [defined + len, tail.value]],
+      dashed: false,
+      fade: true,
+    });
+  }
+  const tMax = defined + len;
+  for (const l of labels) if (l.t1 == null) l.t1 = tMax;
+  return { kind: "graph", segments, phases: labels, defined, tMax };
+}
+
+// Whether a card context is this integration's pump profile select.
+function isProfileSelect(hass, context) {
+  const id = context && context.entity_id;
+  if (!hass || !id || !id.startsWith("select.")) return false;
+  const ent = hass.entities && hass.entities[id];
+  if (!ent || ent.platform !== DOMAIN) return false;
+  if (ent.translation_key != null) return ent.translation_key === "pump_profile";
+  // Without the translation key: the select's own attribute (a key, not a
+  // display name).
+  const st = hass.states && hass.states[id];
+  return !!(st && st.attributes && "first_drop_deadline" in st.attributes);
+}
+
+// Places the end criteria chips: each centred on its x, kept inside
+// [0, width]; overlapping neighbours are moved apart (each by half the
+// overlap, inside the edges), but never further than half their width
+// from their border. What does not fit that way is left out whole, never
+// shortened (a chip without its duration would claim the phase ends only
+// at its exit): first the end chip (``end``: the shot's end), then the
+// latest chip that is still in conflict. items: [{x, parts, end?}] in x
+// order.
+function layoutChips(items, width) {
+  const chips = items.map((it) => ({
+    x: it.x, end: !!it.end, text: it.parts.join(" / "),
+    width: it.parts.join(" / ").length * PREVIEW_CHAR_W + PREVIEW_CHIP_PAD,
+  }));
+  for (;;) {
+    if (!chips.length) return [];
+    const placed = chips.map((c) => ({ ...c, left: Math.min(Math.max(0, c.x - c.width / 2), width - c.width) }));
+    // Overlapping neighbours share the move (half each), inside the edges,
+    // until nothing overlaps (or nothing moves any more).
+    for (let round = 0; round < 100; round++) {
+      let moved = false;
+      for (let i = 1; i < placed.length; i++) {
+        const a = placed[i - 1];
+        const b = placed[i];
+        const overlap = a.left + a.width + PREVIEW_CHIP_GAP - b.left;
+        if (overlap <= 1e-6) continue;
+        const aLeft = Math.max(0, a.left - overlap / 2);
+        const bLeft = Math.min(width - b.width, b.left + overlap / 2);
+        if (aLeft !== a.left || bLeft !== b.left) moved = true;
+        a.left = aLeft;
+        b.left = bLeft;
+      }
+      if (!moved) break;
+    }
+    const overlaps = (i) => i > 0
+      && placed[i - 1].left + placed[i - 1].width + PREVIEW_CHIP_GAP - placed[i].left > 1e-6;
+    const bad = placed.map((c, i) => c.left < -1e-6 || c.width > width + 1e-6 || overlaps(i)
+      || Math.abs(c.left + c.width / 2 - c.x) > c.width / 2 + 1e-6);
+    if (!bad.some(Boolean)) {
+      return placed.map((c) => ({ text: c.text, left: Math.max(0, c.left), width: c.width, x: c.x }));
+    }
+    const end = chips.findIndex((c) => c.end);
+    if (end >= 0) chips.splice(end, 1);
+    else chips.splice(bad.lastIndexOf(true), 1);
+  }
+}
+
+const ICON_MINUS = "M19,13H5V11H19V13Z";
+const ICON_PLUS = "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z";
+
+class DifluidProfilePreview extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._config = null;
+    this._hass = null;
+    this._context = null;
+    this._def = null; // websocket result
+    this._key = null; // what the definition was fetched for
+    this._token = 0;
+    this._width = 0;
+    this._pending = {}; // entity id -> {value sent, for: the state object it was sent from}
+    this._lastHeight = 0;
+    this._floorEntity = null; // from the first definition (refetch key)
+    this._loading = false;
+    this._failures = 0;
+    this._retryAt = null; // a failed fetch: retry from this time (ms)
+    this._html = null;
+    if (this.shadowRoot && this.shadowRoot.addEventListener) {
+      this.shadowRoot.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest("[data-step]") : null;
+        if (btn) {
+          ev.stopPropagation();
+          this._step(Number(btn.dataset.step), btn.dataset.target || "main");
+        }
+      });
+    }
+  }
+
+  static getStubConfig() {
+    return { type: "custom:difluid-profile-preview" };
+  }
+
+  setConfig(config) {
+    if (!config) throw new Error("Invalid configuration");
+    this._config = config;
+    this._update();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._update();
+  }
+
+  get hass() {
+    return this._hass;
+  }
+
+  set context(context) {
+    this._context = context;
+    this._update();
+  }
+
+  // Before the context API (older Home Assistant): the entity's state.
+  set stateObj(stateObj) {
+    if (!this._context && stateObj) this._context = { entity_id: stateObj.entity_id };
+    this._update();
+  }
+
+  connectedCallback() {
+    if (!this._resize && typeof ResizeObserver !== "undefined") {
+      this._resize = new ResizeObserver((entries) => {
+        const w = Math.round(entries[0].contentRect.width);
+        if (w && w !== this._width) {
+          this._width = w;
+          this._render();
+        }
+      });
+      this._resize.observe(this);
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._resize) this._resize.disconnect();
+    this._resize = null;
+  }
+
+  _t(key) {
+    return STRINGS[lang(this._hass)][key] || STRINGS.en[key] || key;
+  }
+
+  _entityId() {
+    return this._context && this._context.entity_id;
+  }
+
+  // Refetch when the entity, the selected profile, its definition
+  // (revision: a profile imported over it), the profile list or the floor
+  // change.
+  _fetchKey() {
+    const id = this._entityId();
+    const st = this._hass && id ? this._hass.states[id] : null;
+    if (!st) return null;
+    const a = st.attributes || {};
+    const floorId = this._floorEntity;
+    const floor = floorId && this._hass.states[floorId] ? this._hass.states[floorId].state : "";
+    const options = a.options || [];
+    // The language too: the phase names come translated (0.7.0b5).
+    return [id, st.state, a.profile_revision ?? "", options.join("\u0001"), floor, this._language() || ""]
+      .join("\u0000");
+  }
+
+  // The frontend's language (the user's profile first).
+  _language() {
+    const h = this._hass;
+    return (h && ((h.locale && h.locale.language) || h.language)) || undefined;
+  }
+
+  _update() {
+    if (!this._hass || !this._config || !this._entityId()) {
+      this._render();
+      return;
+    }
+    const key = this._fetchKey();
+    if (key !== null && key !== this._key) {
+      this._key = key;
+      this._failures = 0;
+      // Another profile (or entity): its old definition is not shown while
+      // the new one loads, a placeholder of the same height instead (no
+      // jump). The same profile (floor, list, revision changed) stays until
+      // the answer.
+      const sel = key.split("\u0000").slice(0, 2).join("\u0000");
+      if (sel !== this._defSel) {
+        this._def = null;
+        this._loading = true;
+      }
+      this._defSel = sel;
+      this._fetch(key);
+    } else if (key !== null && this._retryAt != null && Date.now() >= this._retryAt) {
+      // A failed fetch is retried on a later update, with a growing pause.
+      this._fetch(key);
+    }
+    this._render();
+  }
+
+  async _fetch(key) {
+    const token = ++this._token;
+    this._retryAt = null;
+    const id = this._entityId();
+    const st = this._hass.states[id];
+    let def = null;
+    let failed = false;
+    try {
+      def = await this._hass.callWS({
+        type: `${DOMAIN}/profile`,
+        entity_id: id,
+        label: st ? st.state : undefined,
+        // Built-in profile and phase names in the frontend's language.
+        language: this._language(),
+      });
+    } catch (_err) {
+      failed = true; // unknown profile, scale not loaded, connection lost
+    }
+    // A newer fetch (or a newer selection) wins, in any answer order.
+    if (token !== this._token || key !== this._key) return;
+    this._loading = false;
+    if (failed) {
+      this._failures = (this._failures || 0) + 1;
+      this._retryAt = Date.now() + Math.min(
+        PREVIEW_RETRY_MAX_MS, PREVIEW_RETRY_MS * 2 ** (this._failures - 1));
+      this._def = null;
+    } else {
+      this._failures = 0;
+      this._def = def;
+      if (def && def.floor_entity !== this._floorEntity) {
+        // The floor entity is known now: key it in (no refetch for that).
+        this._floorEntity = def.floor_entity;
+        this._key = this._fetchKey();
+      }
+    }
+    this._render();
+  }
+
+  // What the feature shows: {mode: "graph", preview} | {mode: "target"} |
+  // {mode: "standard"} (0.7.0b4: the Standard power instead of a flat
+  // line), each with the brew ratio row when its number exists; null:
+  // nothing (no definition; Zielzeit/Standard without their number).
+  _view() {
+    const def = this._def;
+    if (!def || !def.profile) return null;
+    const preview = profilePreview(def.profile, def.floor);
+    if (!preview) return null;
+    const ratio = this._numberState(def.ratio_entity);
+    let view;
+    if (preview.kind === "target") {
+      const st = this._numberState(def.target_time_entity);
+      view = st ? { mode: "target", entity: def.target_time_entity, state: st } : null;
+    } else if (def.profile.standard) {
+      const st = this._numberState(def.standard_power_entity);
+      view = st ? { mode: "standard", entity: def.standard_power_entity, state: st } : null;
+    } else {
+      view = { mode: "graph", preview };
+    }
+    // Zielzeit/Standard without their number: the ratio row alone.
+    if (!view) view = ratio ? { mode: "none" } : null;
+    if (!view) return null;
+    if (ratio) view.ratio = { entity: def.ratio_entity, state: ratio };
+    return view;
+  }
+
+  _numberState(id) {
+    return id && this._hass ? this._hass.states[id] || null : null;
+  }
+
+  // A flag of the integration: the select's attribute (live: mode,
+  // options, pump state, auto-stop changes), else the definition's.
+  // "pump_controllable": the pump power is really controlled;
+  // "auto_stop_target": the auto-stop ends the shot at a target.
+  _flag(key) {
+    const st = this._hass && this._entityId() ? this._hass.states[this._entityId()] : null;
+    const attr = st && st.attributes ? st.attributes[key] : undefined;
+    if (typeof attr === "boolean") return attr;
+    return !!(this._def && this._def[key]);
+  }
+
+  _render() {
+    const view = this._view();
+    let html = "";
+    if (view) {
+      let main;
+      if (view.mode === "graph") main = this._graphHtml(view.preview);
+      else if (view.mode === "target") main = this._rowHtml("main", view.state, { kind: "time" });
+      else if (view.mode === "standard") {
+        main = this._rowHtml("main", view.state, { kind: "power", locked: !this._flag("pump_controllable") });
+      } else main = "";
+      const ratio = view.ratio ? this._rowHtml("ratio", view.ratio.state, { kind: "ratio" }) : "";
+      html = `<div class="mode-${view.mode}">${main}${ratio}</div>`;
+    } else if (this._loading && this._html) {
+      // Same height as before while the next definition loads.
+      html = `<div class="placeholder" data-role="loading" style="height: ${Math.max(0, (this._lastHeight || 46) - PREVIEW_TOP)}px"></div>`;
+    }
+    // Nothing to show: no height of its own.
+    if (this.style) this.style.display = html ? "" : "none";
+    if (html === this._html) return;
+    this._html = html;
+    if (view) this._lastHeight = this._heightOf(view);
+    this.shadowRoot.innerHTML = html ? `<style>${DifluidProfilePreview.styles}</style>${html}` : "";
+  }
+
+  // Height of a view (px): stable per kind, whatever the profile. The top
+  // padding adds to the tile's own feature gap (more room under the
+  // dropdown); the block gap separates the graph or the main row from the
+  // ratio row.
+  _heightOf(view) {
+    const main = view.mode === "graph"
+      ? PREVIEW_CHIP_H + 4 + PREVIEW_GRAPH_H + PREVIEW_NAMES_H
+      : view.mode === "none" ? 0 : PREVIEW_ROW_H;
+    return PREVIEW_TOP + main + (view.ratio ? (main ? PREVIEW_BLOCK_GAP : 0) + PREVIEW_ROW_H : 0);
+  }
+
+  _fmt(value, digits) {
+    return Number(value).toLocaleString(lang(this._hass), {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+  }
+
+  // A number with as many decimals as it has (up to 2).
+  _num(v) {
+    const d = Number.isInteger(v) ? 0 : Number.isInteger(Math.round(v * 1000) / 100) ? 1 : 2;
+    return this._fmt(v, d);
+  }
+
+  // What ends a phase (ProfileRun._exit), for its chip: the exit targets in
+  // their order — weight = the cup weight the scale shows (net, after the
+  // tare), flow = the scale flow (after the first drops), ratio = x the
+  // brew's dose as a weight; "≥" (gte, the default) or "≤" (lte), each held
+  // 1 s; the first met ends the phase — then the duration, which ends it at
+  // the latest. The open last phase's cap is not shown (it runs until the
+  // shot ends).
+  _criteria(ph) {
+    const out = [];
+    for (const tg of ph.targets || []) {
+      const lte = tg.operator === "lte";
+      const v = Number(tg.value);
+      if (tg.type === "volumetric") out.push(`${lte ? "≤ " : ""}${this._num(v)} g`);
+      else if (tg.type === "flow") out.push(`${lte ? "≤" : "≥"} ${this._num(v)} g/s`);
+      else if (tg.type === "ratio") out.push(`${lte ? "≤ " : ""}1 : ${this._num(v)}`);
+    }
+    if (ph.duration != null) out.push(`${this._num(ph.duration)} s`);
+    return out;
+  }
+
+  // Chips: at every phase end the criteria that end it; at the right end
+  // the shot's end at the target weight (with an open last phase's own
+  // targets before it) — only when the auto-stop has a target; without one
+  // the shot ends by hand and there is no end chip.
+  _chipItems(preview, x) {
+    const items = [];
+    const last = [];
+    for (const ph of preview.phases) {
+      if (ph.open) last.push(...this._criteria(ph));
+      else items.push({ x: x(ph.t1), parts: this._criteria(ph) });
+    }
+    if (this._flag("auto_stop_target")) {
+      last.push(this._t("preview_target_weight"));
+      items.push({ x: x(preview.tMax), parts: last, end: true });
+    }
+    return items.filter((it) => it.parts.length);
+  }
+
+  _graphHtml(preview) {
+    const W = this._width || this.clientWidth || 300;
+    const H = PREVIEW_GRAPH_H;
+    const plotW = Math.max(20, W - 8);
+    const top = 3;
+    const bottom = H - 2;
+    const x = (t) => 4 + (t / preview.tMax) * plotW;
+    const y = (p) => bottom - (Math.max(0, Math.min(100, p)) / 100) * (bottom - top);
+    const last = preview.segments[preview.segments.length - 1];
+    const tailT0 = last.type === "open" ? last.t0 : last.pts[0][0];
+    const tailT1 = last.type === "open" ? last.t1 : last.pts[last.pts.length - 1][0];
+    const marks = preview.segments.map((seg) => {
+      if (seg.type === "open") {
+        // Power open (the controller's, live): the full height, hatched;
+        // a flow phase's target flow in the middle, on a halo of the card
+        // colour so the hatching does not cross it; left out (not cut) when
+        // the area is too narrow.
+        const x0 = x(seg.t0);
+        const w = Math.max(0, x(seg.t1) - x0);
+        const mask = seg.fade ? ' mask="url(#difluid-fade-mask)"' : "";
+        const edge = seg.dashed
+          ? `<rect x="${x0.toFixed(1)}" y="${top}" width="${w.toFixed(1)}" height="${bottom - top}" fill="none" stroke="${PUMP_COLOR}" stroke-width="1" stroke-dasharray="4 3"></rect>`
+          : "";
+        const flowText = seg.flow != null ? `${this._num(seg.flow)} g/s` : "";
+        const label = flowText && flowText.length * PREVIEW_CHAR_W + 8 <= w
+          ? `<text x="${(x0 + w / 2).toFixed(1)}" y="${((top + bottom) / 2 + 3.5).toFixed(1)}" text-anchor="middle" data-role="flow-target">${escapeHtml(flowText)}</text>`
+          : "";
+        return `<g data-role="${seg.fade ? "open-end" : "open"}"${mask}>`
+          + `<rect x="${x0.toFixed(1)}" y="${top}" width="${w.toFixed(1)}" height="${bottom - top}" fill="${PUMP_COLOR}" fill-opacity="0.15"></rect>`
+          + `<rect x="${x0.toFixed(1)}" y="${top}" width="${w.toFixed(1)}" height="${bottom - top}" fill="url(#difluid-hatch)"></rect>`
+          + `${edge}</g>${label}`;
+      }
+      const d = seg.pts
+        .map((p, i) => `${i ? "L" : "M"}${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`)
+        .join("");
+      const stroke = seg.fade ? "url(#difluid-fade)" : PUMP_COLOR;
+      const dash = seg.dashed ? ' stroke-dasharray="4 3"' : "";
+      const role = seg.fade ? "end" : seg.dashed ? "uncertain" : "fixed";
+      return `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"${dash} data-role="${role}"></path>`;
+    });
+    const x0 = x(tailT0).toFixed(1);
+    const x1 = x(tailT1).toFixed(1);
+    // Phase borders: fine ticks (also where the unnamed return to 100 %
+    // starts); not at the drawing's ends.
+    const ticks = preview.phases
+      .filter((ph) => ph.t1 < preview.tMax - 1e-9)
+      .map((ph) => {
+        const xt = x(ph.t1).toFixed(1);
+        return `<line x1="${xt}" x2="${xt}" y1="${top}" y2="${H}" stroke="var(--divider-color)" stroke-width="1" data-role="phase-tick"></line>`;
+      })
+      .join("");
+    const chips = layoutChips(this._chipItems(preview, x), W)
+      .map((c) => `<span class="chip" data-role="chip" style="left: ${c.left.toFixed(1)}px; width: ${c.width.toFixed(1)}px">${escapeHtml(c.text)}</span>`)
+      .join("");
+    // Names centred under their section, cut with an ellipsis (CSS); left
+    // out where the section is too narrow for a few characters.
+    const names = preview.phases
+      .map((ph) => {
+        const left = x(ph.t0) + PREVIEW_LABEL_PAD;
+        const width = x(ph.t1) - x(ph.t0) - 2 * PREVIEW_LABEL_PAD;
+        if (width < PREVIEW_LABEL_MIN) return "";
+        return `<span class="phase" data-role="phase-label" style="left: ${left.toFixed(1)}px; width: ${width.toFixed(1)}px">${escapeHtml(ph.name)}</span>`;
+      })
+      .join("");
+    return `
+      <div class="graph">
+        <div class="chips">${chips}</div>
+        <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+          <defs>
+            <linearGradient id="difluid-fade" gradientUnits="userSpaceOnUse" x1="${x0}" y1="0" x2="${x1}" y2="0">
+              <stop offset="0" style="stop-color: ${PUMP_COLOR}; stop-opacity: 1"></stop>
+              <stop offset="1" style="stop-color: ${PUMP_COLOR}; stop-opacity: 0"></stop>
+            </linearGradient>
+            <mask id="difluid-fade-mask" maskUnits="userSpaceOnUse" style="mask-type: alpha">
+              <rect x="${x0}" y="0" width="${Math.max(0, x1 - x0).toFixed(1)}" height="${H}" fill="url(#difluid-fade)"></rect>
+            </mask>
+            <pattern id="difluid-hatch" patternUnits="userSpaceOnUse" width="6" height="6" patternTransform="rotate(45)">
+              <line x1="0" y1="0" x2="0" y2="6" stroke="${PUMP_COLOR}" stroke-width="1.5" stroke-opacity="0.6"></line>
+            </pattern>
+          </defs>
+          <line x1="4" x2="${(4 + plotW).toFixed(1)}" y1="${bottom}" y2="${bottom}" stroke="var(--divider-color)" stroke-width="1"></line>
+          ${ticks}
+          ${marks.join("")}
+        </svg>
+        <div class="phases">${names}</div>
+      </div>`;
+  }
+
+  // The value a number shows: a sent one until the entity's state changes
+  // (to it, or by anyone else) or the call fails; else its state.
+  _shownValue(id, st) {
+    const p = this._pending[id];
+    if (p && p.for !== st) delete this._pending[id];
+    return this._pending[id] ? this._pending[id].value : Number(st.state);
+  }
+
+  // − value + (HA's number buttons, their tokens), compact. opts.kind:
+  // "time", "power" (locked: the power is not controlled, fixed 100 %, not
+  // operable) or "ratio" ("1 : x").
+  _buttonsHtml(role, st, opts) {
+    const a = st.attributes || {};
+    const locked = !!opts.locked;
+    const unavailable = st.state === "unavailable" || st.state === "unknown";
+    const current = this._shownValue(st.entity_id, st);
+    const step = Number(a.step) || 1;
+    const digits = step < 1 ? Math.min(3, String(step).split(".")[1]?.length || 1) : 0;
+    let value;
+    if (locked) value = "100 %";
+    else if (unavailable || !Number.isFinite(current)) value = "–";
+    else if (opts.kind === "ratio") value = current > 0 ? `1 : ${this._fmt(current, digits)}` : this._t("preview_off");
+    else value = `${this._fmt(current, digits)}${a.unit_of_measurement ? ` ${escapeHtml(a.unit_of_measurement)}` : ""}`;
+    const off = locked || unavailable;
+    const dis = (cond) => (off || cond ? ' disabled aria-disabled="true"' : "");
+    const atMin = a.min != null && current <= Number(a.min);
+    const atMax = a.max != null && current >= Number(a.max);
+    const icon = (d) => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"></path></svg>`;
+    const cls = ["number", "compact", off ? "unavailable" : "", locked ? "locked" : ""]
+      .filter(Boolean).join(" ");
+    const what = opts.kind;
+    return `
+      <div class="${cls}" data-role="${role}">
+        <button class="button minus" data-step="-1" data-target="${role}" aria-label="${this._t(`preview_dec_${what}`)}"${dis(atMin)}>${icon(ICON_MINUS)}</button>
+        <span class="value" data-role="value">${value}</span>
+        <button class="button plus" data-step="1" data-target="${role}" aria-label="${this._t(`preview_inc_${what}`)}"${dis(atMax)}>${icon(ICON_PLUS)}</button>
+      </div>`;
+  }
+
+  // A labelled row: the label right next to the compact − value +, the
+  // pair right-aligned; the label outside the grey area (greyed out with
+  // a locked input).
+  _rowHtml(role, st, opts) {
+    const label = this._t(`preview_label_${opts.kind}`);
+    const rowRole = role === "ratio" ? "ratio-row" : "main-row";
+    return `
+      <div class="row${opts.locked ? " locked" : ""}" data-role="${rowRole}">
+        <span class="row-label">${escapeHtml(label)}</span>
+        ${this._buttonsHtml(role, st, opts)}
+      </div>`;
+  }
+
+  // − / + : one step, snapped and clamped like HA's number buttons; sent
+  // at once (number.set_value). target: "main" (target shot time or
+  // Standard power) or "ratio".
+  _step(dir, target = "main") {
+    const view = this._view();
+    if (!view || !this._hass) return;
+    let entity;
+    let st;
+    if (target === "ratio") {
+      if (!view.ratio) return;
+      ({ entity, state: st } = view.ratio);
+    } else {
+      if (view.mode === "graph") return;
+      if (view.mode === "none") return;
+      if (view.mode === "standard" && !this._flag("pump_controllable")) return; // locked
+      ({ entity, state: st } = view);
+    }
+    if (st.state === "unavailable" || st.state === "unknown") return;
+    const a = st.attributes || {};
+    const base = this._shownValue(entity, st);
+    if (!Number.isFinite(base)) return;
+    const step = Number(a.step) || 1;
+    let value = Math.round((base + dir * step) / step) * step;
+    if (a.min != null) value = Math.max(Number(a.min), value);
+    if (a.max != null) value = Math.min(Number(a.max), value);
+    value = Number(value.toFixed(6));
+    if (value === base) return;
+    this._pending[entity] = { value, for: st };
+    this._render();
+    const done = this._hass.callService("number", "set_value", { entity_id: entity, value });
+    if (done && typeof done.catch === "function") {
+      done.catch(() => {
+        // Failed: back to the entity's state.
+        const p = this._pending[entity];
+        if (p && p.value === value) {
+          delete this._pending[entity];
+          this._render();
+        }
+      });
+    }
+  }
+}
+
+// Theme tokens only (the graph's yellow is the pump colour token); the
+// buttons use the tokens of HA's number buttons (numeric-input feature).
+DifluidProfilePreview.styles = `
+  :host { display: block; width: 100%; padding-top: ${PREVIEW_TOP}px; box-sizing: border-box; }
+  .graph { position: relative; display: flex; flex-direction: column; gap: 0; border-radius: var(--feature-border-radius, 12px); }
+  .graph svg { display: block; }
+  .graph svg text { font-family: var(--ha-font-family-body, inherit); font-size: 10px; fill: var(--primary-text-color); font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--card-background-color, var(--ha-card-background, var(--primary-background-color))); stroke-width: 4px; stroke-linejoin: round; }
+  .chips { position: relative; height: ${PREVIEW_CHIP_H}px; margin-bottom: 4px; }
+  .chip { position: absolute; top: 0; box-sizing: border-box; height: ${PREVIEW_CHIP_H}px; padding: 0 6px; border-radius: 7px; background: color-mix(in srgb, var(--primary-text-color) 9%, transparent); color: var(--secondary-text-color); font-family: var(--ha-font-family-body, inherit); font-size: 10px; line-height: ${PREVIEW_CHIP_H}px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  .phases { position: relative; height: ${PREVIEW_NAMES_H}px; }
+  .phase { position: absolute; top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font-family: var(--ha-font-family-body, inherit); font-size: var(--ha-font-size-xs, 10px); line-height: ${PREVIEW_NAMES_H}px; color: var(--secondary-text-color); }
+  .number { pointer-events: auto; position: relative; display: flex; align-items: center; justify-content: space-between; height: var(--feature-height, 42px); border-radius: var(--feature-border-radius, 12px); overflow: hidden; color: var(--primary-text-color); font-weight: var(--ha-font-weight-medium, 500); }
+  .number::before { content: ""; position: absolute; inset: 0; background-color: var(--control-number-buttons-background-color, var(--disabled-color)); opacity: var(--control-number-buttons-background-opacity, 0.2); pointer-events: none; }
+  .number.unavailable { color: var(--disabled-text-color, var(--disabled-color)); }
+  .number.locked { opacity: 0.6; }
+  .number.compact { width: ${PREVIEW_RATIO_W}px; height: ${PREVIEW_ROW_H}px; flex: none; }
+  .value { position: relative; flex: 1; text-align: center; font-variant-numeric: tabular-nums; }
+  .button { position: relative; width: 35px; height: 100%; padding: 0; border: none; background: none; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .button svg { width: 16px; height: 16px; fill: currentColor; }
+  .button[disabled] { opacity: 0.4; cursor: not-allowed; }
+  .button:focus-visible { outline: 2px solid var(--control-number-buttons-focus-color, var(--secondary-text-color)); outline-offset: -2px; border-radius: var(--feature-border-radius, 12px); }
+  .row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; height: ${PREVIEW_ROW_H}px; min-width: 0; }
+  .graph + .row, .row + .row { margin-top: ${PREVIEW_BLOCK_GAP}px; }
+  .row-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--ha-font-family-body, inherit); font-size: 12px; color: var(--secondary-text-color); white-space: nowrap; }
+  .row.locked .row-label { color: var(--disabled-text-color, var(--disabled-color)); }
+`;
+
 // Pure helpers, for tests (tests/card_flow_test.mjs).
-DifluidBrewCard.math = { monotone, smoothedFlow, displayProfile, parseFlowSmoothing, despike, isotonic, trendFlow };
+DifluidBrewCard.math = { observedOnly, monotone, smoothedFlow, displayProfile, parseFlowSmoothing, despike, isotonic, trendFlow, throttleView, powerSteps, stepAt, hasPump, escapeHtml, profilePreview, isProfileSelect, layoutChips, profileName, BUILTIN_PROFILES };
 
 if (!customElements.get("difluid-brew-card")) {
   customElements.define("difluid-brew-card", DifluidBrewCard);
 }
 if (!customElements.get("difluid-brew-card-editor")) {
   customElements.define("difluid-brew-card-editor", DifluidBrewCardEditor);
+}
+if (!customElements.get("difluid-profile-preview")) {
+  customElements.define("difluid-profile-preview", DifluidProfilePreview);
 }
 
 window.customCards = window.customCards || [];
@@ -2523,6 +3922,18 @@ if (!window.customCards.some((c) => c.type === "difluid-brew-card")) {
     description: STRINGS[l].picker_desc,
     preview: false,
     documentationURL: "https://github.com/radecke/ha-difluid-microbalance",
+  });
+}
+
+// Tile feature: under the profile select's select-options feature.
+window.customCardFeatures = window.customCardFeatures || [];
+if (!window.customCardFeatures.some((f) => f.type === "difluid-profile-preview")) {
+  const l = (navigator.language || "en").toLowerCase().startsWith("de") ? "de" : "en";
+  window.customCardFeatures.push({
+    type: "difluid-profile-preview",
+    name: STRINGS[l].preview_name,
+    configurable: false,
+    isSupported: (hass, context) => isProfileSelect(hass, context),
   });
 }
 

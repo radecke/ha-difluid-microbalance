@@ -92,3 +92,31 @@ class DifluidStopEntity(Entity):
         self.async_on_remove(
             self.coordinator.autostop.async_add_listener(self.async_write_ha_state)
         )
+
+
+class DifluidThrottleEntity(Entity):
+    """Pump throttle entity: integration state, always available.
+
+    Writes state only when the throttle's settings, model or values change.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(
+        self, coordinator: DifluidCoordinator, description: EntityDescription
+    ) -> None:
+        """Initialize the entity."""
+        self.coordinator = coordinator
+        self.entity_description = description
+        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._attr_device_info = _device_info(coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the throttle."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self.coordinator.autostop.throttle.async_add_listener(
+                self.async_write_ha_state
+            )
+        )

@@ -1,0 +1,256 @@
+{
+ "floor": 40.0,
+ "builtins": [
+  {
+   "label": "standard",
+   "name": "Standard",
+   "revision": "256afdc09e62",
+   "builtin": true,
+   "standard": true,
+   "throttle": null,
+   "phases": [
+    {
+     "name": "Bezug",
+     "key": "brew",
+     "duration": 120.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": []
+    }
+   ]
+  },
+  {
+   "label": "soft_preinfusion",
+   "name": "Sanfte Vorbrühung",
+   "revision": "fa981bb4bae5",
+   "builtin": true,
+   "standard": false,
+   "throttle": null,
+   "phases": [
+    {
+     "name": "Vorbrühung",
+     "key": "preinfusion",
+     "duration": 15.0,
+     "power": 40.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": [
+      {
+       "type": "volumetric",
+       "operator": "gte",
+       "value": 2.0
+      }
+     ]
+    },
+    {
+     "name": "Bezug",
+     "key": "brew",
+     "duration": 120.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "linear",
+     "transition_duration": 4.0,
+     "targets": []
+    }
+   ]
+  },
+  {
+   "label": "blooming",
+   "name": "Blooming",
+   "revision": "2cfad7959c41",
+   "builtin": true,
+   "standard": false,
+   "throttle": null,
+   "phases": [
+    {
+     "name": "Füllen",
+     "key": "fill",
+     "duration": 12.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": [
+      {
+       "type": "volumetric",
+       "operator": "gte",
+       "value": 1.5
+      }
+     ]
+    },
+    {
+     "name": "Blooming",
+     "key": "bloom",
+     "duration": 30.0,
+     "power": 0.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": []
+    },
+    {
+     "name": "Fluss",
+     "key": "flow",
+     "duration": 120.0,
+     "power": null,
+     "flow": 2.2,
+     "transition": "linear",
+     "transition_duration": 5.0,
+     "targets": []
+    }
+   ]
+  },
+  {
+   "label": "allonge",
+   "name": "Allongé",
+   "revision": "e7b06a195c55",
+   "builtin": true,
+   "standard": false,
+   "throttle": null,
+   "phases": [
+    {
+     "name": "Füllen",
+     "key": "fill",
+     "duration": 12.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": [
+      {
+       "type": "volumetric",
+       "operator": "gte",
+       "value": 1.5
+      }
+     ]
+    },
+    {
+     "name": "Fluss",
+     "key": "flow",
+     "duration": 120.0,
+     "power": null,
+     "flow": 4.5,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": []
+    }
+   ]
+  },
+  {
+   "label": "lever",
+   "name": "Hebel-Annäherung",
+   "revision": "ced0e577c0b7",
+   "builtin": true,
+   "standard": false,
+   "throttle": null,
+   "phases": [
+    {
+     "name": "Füllen",
+     "key": "fill",
+     "duration": 20.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": [
+      {
+       "type": "volumetric",
+       "operator": "gte",
+       "value": 4.0
+      }
+     ]
+    },
+    {
+     "name": "Spitze",
+     "key": "peak",
+     "duration": 8.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": []
+    },
+    {
+     "name": "Abfall",
+     "key": "decline",
+     "duration": 120.0,
+     "power": 60.0,
+     "flow": null,
+     "transition": "linear",
+     "transition_duration": 20.0,
+     "targets": []
+    }
+   ]
+  },
+  {
+   "label": "target_time",
+   "name": "Zielzeit",
+   "revision": "b8da047e868a",
+   "builtin": true,
+   "standard": false,
+   "throttle": "target_time",
+   "phases": [
+    {
+     "name": "Bezug",
+     "key": "brew",
+     "duration": 120.0,
+     "power": 100.0,
+     "flow": null,
+     "transition": "instant",
+     "transition_duration": 0.0,
+     "targets": []
+    }
+   ]
+  }
+ ],
+ "imported": {
+  "label": "Importiert Ease",
+  "name": "Importiert Ease",
+  "revision": "b6ca7a650716",
+  "builtin": false,
+  "standard": false,
+  "throttle": null,
+  "phases": [
+   {
+    "name": "Pre",
+    "key": "Pre",
+    "duration": 8.0,
+    "power": 20.0,
+    "flow": null,
+    "transition": "ease-in-out",
+    "transition_duration": 3.0,
+    "targets": []
+   },
+   {
+    "name": "Druck",
+    "key": "Druck",
+    "duration": 10.0,
+    "power": 100.0,
+    "flow": null,
+    "transition": "ease-out",
+    "transition_duration": 2.0,
+    "targets": [
+     {
+      "type": "ratio",
+      "operator": "gte",
+      "value": 1.0
+     }
+    ]
+   },
+   {
+    "name": "Ausklang",
+    "key": "Ausklang",
+    "duration": 15.0,
+    "power": 70.0,
+    "flow": null,
+    "transition": "linear",
+    "transition_duration": 30.0,
+    "targets": []
+   }
+  ]
+ },
+ "language": "de"
+}

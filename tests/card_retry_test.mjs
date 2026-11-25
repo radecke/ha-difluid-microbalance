@@ -87,14 +87,29 @@ class FakeConn {
   }
 }
 
-function hassWith(conn) {
+// opts.brews: the stored list; opts.hold: answers wait until released
+// (conn.release()), like a reload still in flight on the network.
+function hassWith(conn, opts = {}) {
+  conn.held = [];
+  conn.release = () => conn.held.splice(0).forEach((go) => go());
+  // The call is counted when it is made, answered now or on release.
+  const answer = (msg, ok = conn._ok(msg.type)) =>
+    ok
+      ? Promise.resolve(
+          msg.type.endsWith("/brews")
+            ? { brews: opts.brews || [] }
+            : { brew: opts.brews ? { id: msg.brew_id, profile: [] } : null }
+        )
+      : Promise.reject(new Error("failed"));
   return {
     connection: conn,
     language: "en",
     callWS: (msg) =>
-      conn._ok(msg.type)
-        ? Promise.resolve(msg.type.endsWith("/brews") ? { brews: [] } : { brew: null })
-        : Promise.reject(new Error("failed")),
+      opts.hold
+        ? ((ok) => new Promise((resolve) => conn.held.push(() => resolve(answer(msg, ok)))))(
+            conn._ok(msg.type)
+          )
+        : answer(msg),
   };
 }
 
@@ -111,6 +126,7 @@ function makeCard() {
 const SUB = "difluid_scale/subscribe_brews";
 const LIVE = "difluid_scale/subscribe_live";
 const LIST = "difluid_scale/brews";
+const BREW = "difluid_scale/brew";
 
 async function reset() {
   now = 0;
@@ -208,4 +224,98 @@ async function reset() {
   assert.equal(conn2.count(SUB), 1);
 }
 
-console.log("card retry: 4 scenarios OK");
+// 5. Audit C1: a failed brew switch (_step) does not leave the card on the
+//    error: the brew is fetched again with backoff, list and position kept.
+{
+  await reset();
+  const conn = new FakeConn({ [BREW]: [true, false, false, true] });
+  const card = makeCard();
+  card.hass = hassWith(conn, { brews: [{ id: "a" }, { id: "b" }] });
+  await flush();
+  assert.equal(conn.count(BREW), 1, "newest brew fetched");
+  await card._step(1);
+  assert.equal(card._index, 1);
+  assert.equal(card._error, "failed", "the failure is shown");
+  assert.equal(timers.length, 1, "and retried");
+  await advance(2000);
+  assert.equal(conn.count(BREW), 3, "retried after 2 s");
+  assert.equal(card._error, "failed", "still failing");
+  await advance(5000);
+  assert.equal(conn.count(BREW), 4, "backoff: next try after 5 s");
+  assert.equal(card._error, null, "recovered");
+  assert.equal(card._index, 1, "position kept");
+  assert.ok(card._cache.get("b"), "brew shown");
+  assert.equal(conn.count(LIST), 1, "the list is not reloaded");
+  assert.equal(timers.length, 0, "no further retries");
+  assert.equal(card._retryCount, 0, "backoff reset");
+  // Stepping works again afterwards.
+  await card._step(-1);
+  assert.equal(card._index, 0);
+  assert.equal(card._error, null);
+}
+
+// 6. A failed step is also recovered by the reconnect reload, which
+//    cancels the pending retry.
+{
+  await reset();
+  const conn = new FakeConn({ [BREW]: [true, false, true] });
+  const card = makeCard();
+  card.hass = hassWith(conn, { brews: [{ id: "a" }, { id: "b" }] });
+  await flush();
+  await card._step(1);
+  assert.equal(card._error, "failed");
+  conn.listeners.get("ready")();
+  await flush();
+  assert.equal(card._error, null, "reloaded");
+  assert.equal(card._index, 1, "on the same brew");
+  assert.equal(timers.length, 0, "retry cancelled");
+}
+
+// 7. Audit C5: a reconnect loads the history once, although both the
+//    connection's ready event and the resubscribed live snapshot ask.
+{
+  await reset();
+  const conn = new FakeConn({});
+  const card = makeCard();
+  card.hass = hassWith(conn, { brews: [{ id: "a" }], hold: true });
+  await flush();
+  card._onLive({ type: "live_idle" }); // first snapshot
+  conn.release();
+  await flush();
+  conn.release();
+  await flush();
+  assert.equal(conn.count(LIST), 1);
+  // Reconnect: ready first, then the library's resubscribe snapshot,
+  // while the reload is still in flight.
+  conn.listeners.get("ready")();
+  card._onLive({ type: "live_idle" });
+  card._onLive({ type: "live_ready", ready: false });
+  assert.equal(conn.count(LIST), 2, "one reload for the reconnect");
+  conn.release();
+  await flush();
+  conn.release();
+  await flush();
+  assert.equal(conn.count(LIST), 2);
+  assert.equal(card._resyncing, null, "done");
+  // The next reconnect reloads again.
+  conn.listeners.get("ready")();
+  card._onLive({ type: "live_idle" });
+  assert.equal(conn.count(LIST), 3);
+  conn.release();
+  await flush();
+  conn.release();
+  await flush();
+  // A brew whose end was missed during the reconnect: still one reload.
+  card._onLive({ type: "live_start", start_ts: 0, dose: 18, points: [], weight: 0, flow: 0, elapsed: 1, phase: "brewing" });
+  conn.listeners.get("ready")();
+  card._onLive({ type: "live_idle" });
+  assert.equal(card._live, null, "back to the history");
+  assert.equal(conn.count(LIST), 4, "one reload");
+  conn.release();
+  await flush();
+  conn.release();
+  await flush();
+  assert.equal(conn.count(LIST), 4);
+}
+
+console.log("card retry: 7 scenarios OK");

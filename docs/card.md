@@ -111,7 +111,7 @@ The line is yellow by default; the theme variable `difluid-pump-color` changes i
 
 ## Profile preview (tile feature)
 
-A tile feature for the **Pump profile** select (0.7.0): under the select's own dropdown it shows the selected profile's pump power course; for *Target time* (the adaptive throttle, it has no fixed course) the **Target shot time** and for *Standard* the **Standard pump power** (0.7.0) of the same scale as − value + buttons instead. Under every view a **Brew Ratio** row sets the target ratio ("1 : 2.8", − and +). It follows the profile when you change it. Part of the card's resource, no extra setup.
+A tile feature for the **Pump profile** select (0.7.0): under the select's own dropdown it shows the selected profile's pump power course; for *Target time* (the adaptive throttle, it has no fixed course) the **Target shot time** and for *Standard* the **Standard pump power** (0.7.0) of the same scale as − value + buttons instead. Under every view a **Brew Ratio** row sets the target ratio ("1 : 2.8", − and +). It follows the profile when you change it. Part of the card's resource, no extra setup. Screenshot: [README, Profile preview](../README.md#profile-preview).
 
 ```yaml
 type: tile

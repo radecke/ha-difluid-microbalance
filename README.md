@@ -134,19 +134,7 @@ flow_smoothing: 3                     # optional: seconds (0–10), 0 = raw scal
 - **Full screen** (`expand_when_active: true`): the card covers the dashboard view while ready or brewing and shrinks back when the brew is saved.
 - **Stored brews:** a calm smoothed flow line, bean and metrics, the target, **replay** in real time, and **delete** (with a confirmation in the card).
 - **Pump control:** the commanded pump power as a band under the chart (with a *Pump power* entity; dashed when only observed), and its value where you point when the pump was controlled.
-- **Profile preview:** a tile feature for the *Pump profile* select draws the selected profile under its dropdown (what ends each phase over the graph, the phase names under it); for *Target time* it sets the target shot time, for *Standard* the Standard pump power instead; the brew ratio under it:
-
-```yaml
-type: tile
-entity: select.<your scale>_pump_profile
-features:
-  - type: select-options
-  - type: custom:difluid-profile-preview
-grid_options:
-  rows: auto   # sections view: let the card grow with the preview
-```
-
-In a sections view the grid sizes a tile card from the number of its features, one feature row each; the preview is taller than one row and would overflow into the next card, so the card needs `rows: auto`.
+- **Profile preview:** a tile feature for the *Pump profile* select, see [below](#profile-preview).
 
 Dashboards in YAML mode need the resource by hand, with the integration's version as `?v=` (change it with every update so that browsers load the new card):
 
@@ -158,6 +146,31 @@ lovelace:
 ```
 
 All options and views: [Brew card](https://github.com/radecke/ha-difluid-microbalance/blob/main/docs/card.md).
+
+### Profile preview
+
+A tile feature for the *Pump profile* select. Under the select's dropdown it draws the selected profile: the pump power of each phase, what ends each phase (weight, time, flow) above the graph and the phase names below it. For *Target time* it shows the target shot time and for *Standard* the Standard pump power instead, each with − and + buttons. Under every profile a **Brew Ratio** row sets the target ratio.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/radecke/ha-difluid-microbalance/main/docs/profile-preview-dark.png">
+  <img alt="Tile card for the Pump profile select with the profile preview: Blooming - fill at full power until 1.5 g or 12 s, bloom with the pump off for 30 s, then a flow phase at 2.2 g/s until the target weight; Brew Ratio 1 : 2.7" src="https://raw.githubusercontent.com/radecke/ha-difluid-microbalance/main/docs/profile-preview-light.png" width="480">
+</picture>
+
+<sub>The built-in profile Blooming with a target ratio of 1 : 2.7 (43.2 g for a 16 g dose).</sub>
+
+Add it to a tile card of the select:
+
+```yaml
+type: tile
+entity: select.<your scale>_pump_profile
+features:
+  - type: select-options
+  - type: custom:difluid-profile-preview
+grid_options:
+  rows: auto   # sections view: lets the card grow with the preview
+```
+
+In a sections view the card needs `rows: auto`, otherwise the preview overlaps the next card.
 
 ## Auto-stop
 

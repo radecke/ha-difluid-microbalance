@@ -5,7 +5,7 @@ Reference for [DiFluid Microbalance for Home Assistant](../README.md#upgrading-f
 ## Testers of the 0.6.0 and 0.7.0 test versions
 
 - 0.6.0 was never released; 0.7.0 follows 0.5.1.
-- A learning store from 0.6.0 starts with the pump profile *Zielzeit* active, so shots behave as before (the throttle).
+- A learning store from 0.6.0 starts with the pump profile *Target time* (`target_time`) active, so shots behave as before (the throttle).
 - The tare rule of the 0.7.0 test versions is replaced by *Prepare brew* (see [Prepare brew gate](pump-control.md#prepare-brew-gate)); the option *Tare window* is removed (config entry 1.2).
 - Brews stored by the 0.7.0 test versions may carry the profile reason `no_tare` instead of `not_prepared`.
 - From 0.7.0b5 or older: each bean's ratio becomes its ratio for its pump profile (config entry 1.4); a downgrade keeps working with that ratio.

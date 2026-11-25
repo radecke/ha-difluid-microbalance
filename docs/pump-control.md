@@ -15,7 +15,7 @@ Reference for [DiFluid Microbalance for Home Assistant](../README.md#pump-profil
   - [Power limits and blooms](#power-limits-and-blooms)
   - [Flow phases](#flow-phases)
   - [Scale data and clock](#scale-data-and-clock)
-- [Pump throttle (profile Zielzeit)](#pump-throttle-profile-zielzeit)
+- [Pump throttle (profile Target time)](#pump-throttle-profile-target-time)
   - [Prediction and trigger](#prediction-and-trigger)
   - [Control](#control)
   - [Pump throttle learning](#pump-throttle-learning)
@@ -29,11 +29,11 @@ Reference for [DiFluid Microbalance for Home Assistant](../README.md#pump-profil
 - The **stop switch** of the [auto-stop](auto-stop.md) must be the relay that starts and stops the pump. Shot time 0 is its `off → on`, measured in Home Assistant (the scale's own timer can start late over Bluetooth). A relay that was `unavailable`/`unknown` before is no pump start. A scale brew is matched to a relay start at most 20 s before and 5 s after the brew start. Brews started with the machine's own button have no relay start; they are recorded but never throttled or profiled.
 - An active auto-stop target (target ratio or target yield). The throttle needs it for its prediction; a profile defines only phases, so without a target its shot ends only when the relay goes off.
 - For `throttle` mode: a **number entity that sets the pump power**, chosen in the options as *Pump power* (Configure → Brew detection and stop switch; e.g. an ESPHome dimmer with phase-angle or pulse-skip control in the pump circuit). Powers are in % of its maximum (`value / max`; e.g. 0–100 in steps of 2 or 0–255 in steps of 1); its `min` is a lower bound of its own, values stay on its grid (`min + n × step`) and the floor is rounded up to the next grid value. Without it the throttle and the profiles can only observe.
-- For the throttle (Zielzeit) also a tared cup: its prediction starts at the first drop.
+- For the throttle (Target time) also a tared cup: its prediction starts at the first drop.
 
 ## Modes
 
-The select **Pump throttle** sets the mode for every pump profile, the Zielzeit throttle included (the entity and option keys keep the throttle's name):
+The select **Pump throttle** sets the mode for every pump profile, the Target time throttle included (the entity and option keys keep the throttle's name):
 
 | Mode | Shown as | Effect |
 |---|---|---|
@@ -50,7 +50,7 @@ The pump must fall back to full power **on its own** when Home Assistant or the 
 - **One writer.** Pump commands are sent one at a time, the newest value wins, errors are only logged (the auto-stop never waits for them). After a command, the command counts as the power in effect until the entity shows it; an entity that does not show it within 2 s is warned about once.
 - **Pump left low.** A pump this integration set below its maximum is remembered (`restore_pending` in the store, across restarts). The flag clears only when the entity reports its maximum after the maximum was asked for — never on the old state a pump still shows right after a lower command (ESPHome, MQTT and Zigbee numbers report after the call). "At its maximum" allows the smaller of half a grid step and 0.5 % of the range (99.9 of 100 counts; 90 on a step-10 grid never does).
 - If the restore at the end of a shot fails (pump entity unavailable, e.g. the ESP's Wi-Fi, or a restart mid-shot), it is retried when the entity comes back from unavailable/unknown with a lower number and at every start — in every mode, also `observe` and `off` — at most once every 30 s per pump. A retry asked for within those 30 s is not dropped but runs once at their end, and a retry whose call failed does not count towards the 30 s. A pump that never reports never causes a loop of commands.
-- A relay that goes unavailable or unknown mid-shot ends the shot (profile and Zielzeit) and sets the pump back.
+- A relay that goes unavailable or unknown mid-shot ends the shot (profile and Target time) and sets the pump back.
 
 ## Prepare brew gate
 
@@ -61,7 +61,7 @@ A pump profile runs only if the integration's **Prepare brew** switch (`switch.<
 - Turn the switch on before the shot, by hand or from an automation (e.g. the one that tares the cup, the relay following a second later).
 - The switch is read only at the relay start: it turns itself off when the brew ends (or after 10 minutes without a brew starting), and that never ends a running profile.
 - A skipped profile is visible: the card shows "*profile* skipped (not prepared): full power" under the time, the brew stores `profile_reason` `not_prepared`, and the select's `last_outcome` is `not_prepared`.
-- The Zielzeit profile (the throttle) keeps its own rules (a relay start matched to a scale brew with a tared cup); it does not need *Prepare brew*.
+- The Target time profile (the throttle) keeps its own rules (a relay start matched to a scale brew with a tared cup); it does not need *Prepare brew*.
 
 ## Pump profiles
 
@@ -79,7 +79,7 @@ Import, export and delete your own profiles with the [profile services](services
 
 Read-only. Untuned starting values derived from published Decent and Scott Rao profiles — **not measurements**. The pump's stall threshold on your machine is unknown, so nothing goes below the floor except an explicit 0 % bloom. Last phases run 120 s (the auto-stop ends the shot).
 
-**Ids and names (0.7.0).** The built-in profiles have ids: `standard`, `soft_preinfusion`, `blooming`, `allonge`, `lever`, `target_time` — the select's options, the stored active profile, a bean's default profile, the `profile` of new brew records and `export_profile` use them. Home Assistant shows them in its language (en: Standard, Soft preinfusion, Blooming, Allongé, Lever approximation, Target time; de: Standard, Sanfte Vorbrühung, Blooming, Allongé, Hebel-Annäherung, Zielzeit), and the built-ins' phase names too (keys `brew`, `preinfusion`, `fill`, `bloom`, `flow`, `peak`, `decline`; shown e.g. as Fill / Füllen). The ids, the old German labels and the built-ins' names in English and German are reserved: an import with such a label (any case) is refused. **Breaking for the test versions:** `select.select_option` and state comparisons on the *Pump profile* select now need the id (see [Upgrading](upgrading.md#upgrading-to-070b5-test-version)). Services (`export_profile`, `delete_profile`, a bean's `profile`) accept the id or the old German label. Imported profiles keep their label and phase names. Brew records stored before keep the German label; the card shows the built-in's name for it.
+**Ids and names (0.7.0).** The built-in profiles have ids: `standard`, `soft_preinfusion`, `blooming`, `allonge`, `lever`, `target_time` — the select's options, the stored active profile, a bean's default profile, the `profile` of new brew records and `export_profile` use them. Home Assistant shows them and the built-ins' phase names in its language (English or German). The ids, the built-ins' names and their old labels from the test versions are reserved: an import with such a label (any case) is refused. **Breaking for the test versions:** `select.select_option` and state comparisons on the *Pump profile* select now need the id (see [Upgrading](upgrading.md#upgrading-to-070b5-test-version)). Services (`export_profile`, `delete_profile`, a bean's `profile`) accept the id or the old label from the test versions. Imported profiles keep their label and phase names. Brew records stored before keep their old label; the card shows the built-in's name for it.
 
 **Migration (0.7.0).** On the first start the learning store goes from 1.3 to 1.4: an active profile stored by its German label is stored by its id; an imported profile whose label equals a new id (e.g. "lever") is renamed to "<label> (imported)" (or "<label> (imported 2)", … when that name exists; the suffix is English in every language, it is a stored name). The config entry goes from 1.2 to 1.3: a bean's default pump profile naming a built-in by its German label names it by its id. **Downgrade to 0.7.0:** the learning store and the entry keep the ids; 0.7.0 does not know them, so its select starts at Standard and a bean's default profile id is ignored (the active profile stays); choose the profile again. Records written by 0.7.0 show the id as the profile name there.
 
@@ -88,11 +88,11 @@ Read-only. Untuned starting values derived from published Decent and Scott Rao p
 | Profile | Phases (untuned starting values) |
 |---|---|
 | `standard` — Standard | The *Standard pump power* for the whole shot (default 100 %: the behaviour without profiles). |
-| `soft_preinfusion` — Soft preinfusion / Sanfte Vorbrühung | Preinfusion at 40 % (at least the floor) until 2 g in the cup or 15 s; then a 4 s linear ramp to 100 %. |
+| `soft_preinfusion` — Soft preinfusion | Preinfusion at 40 % (at least the floor) until 2 g in the cup or 15 s; then a 4 s linear ramp to 100 %. |
 | `blooming` — Blooming | After Rao/Decent: fill at 100 % until the first drops (1.5 g) or 12 s; bloom at 0 % for 30 s; 5 s linear ramp into a flow target of 2.2 g/s. (Decent's original fills at 4 ml/s until 4 bar, holds flow 0 for 30 s, ramps to 2.2 ml/s and aims at 1:2 in 60–70 s with ~8 g dripped before the ramp; without a pressure sensor the fill ends at the first drops instead.) |
 | `allonge` — Allongé | After Rao: 100 % until the first drops (1.5 g) or 12 s, then a flow target of 4.5 g/s; meant for a coarse grind and ~1:5 (set the ratio on the auto-stop or the bean). A vibration pump may not reach 4.5 g/s at all: then the pump stays at 100 % and the shot is a Standard shot. |
-| `lever` — Lever approximation / Hebel-Annäherung | 100 % until 4 g in the cup (at most 20 s), hold 100 % for 8 s, then a linear decline to 60 % (at least the floor) over 20 s, and hold. Unlike lever profiles such as Decent's LRv3 it has no low-pressure preinfusion before the peak (that needs pressure control). |
-| `target_time` — Target time / Zielzeit | 100 % plus the [pump throttle](#pump-throttle-profile-zielzeit): a shot predicted too fast is slowed to the target shot time. The only profile that runs the throttle. |
+| `lever` — Lever approximation | 100 % until 4 g in the cup (at most 20 s), hold 100 % for 8 s, then a linear decline to 60 % (at least the floor) over 20 s, and hold. Unlike lever profiles such as Decent's LRv3 it has no low-pressure preinfusion before the peak (that needs pressure control). |
+| `target_time` — Target time | 100 % plus the [pump throttle](#pump-throttle-profile-target-time): a shot predicted too fast is slowed to the target shot time. The only profile that runs the throttle. |
 
 Every weight exit counts only when held for 1 s (see [Profile format](#profile-format)), so "until the first drops (1.5 g)" means 1.5 g held for 1 s.
 
@@ -123,12 +123,12 @@ A subset of the [GaggiMate profile JSON](https://docs.gaggimate.eu/docs/profiles
   - `ratio`: × the brew's dose (at most 20), i.e. a weight; GaggiMate's parser knows it too (`TARGET_TYPE_RATIO`). Without a known dose the target is ignored and logged.
 - **Phase end:** when its duration has elapsed **or** the first of its targets is met **for 1 s** on end (pump vibration moves an empty cup by 0.1–1.0 g; one frame never ends a phase). First drops = the brew metrics' rule: at least 1.5 g held for 1 s. Without scale data (no brew detected, cup not tared, scale silent) weight and flow targets are skipped and only durations end phases (logged once per shot). After the last phase the pump goes back to 100 %.
 - **Rejected** with a clear error because they need a pressure sensor: `pump` `{"target": "pressure"}`, target types `pressure` and `pumped`, transitions over `volumetric`/`pumped`.
-- **Unknown fields** are kept (export returns them) but ignored. Own extensions start with `x_`: `x_first_drop_deadline` (above); `x_throttle` is reserved for Zielzeit.
+- **Unknown fields** are kept (export returns them) but ignored. Own extensions start with `x_`: `x_first_drop_deadline` (above); `x_throttle` is reserved for Target time.
 
 Minimal example (the `import_profile` example):
 
 ```json
-{"label": "Mein Profil", "type": "pro", "phases": [{"name": "Bezug", "phase": "brew", "duration": 60, "pump": 100}]}
+{"label": "My profile", "type": "pro", "phases": [{"name": "Brew", "phase": "brew", "duration": 60, "pump": 100}]}
 ```
 
 ### Power limits and blooms
@@ -156,9 +156,9 @@ The profile reads every accepted weight frame from the relay start on — whethe
 
 The run advances on every scale frame and on a 0.25 s tick without one (the resolution of a ramp, not a delay); commands go through the throttle's single pump queue (newest value wins). An error ends the run and sets the pump back to full power.
 
-## Pump throttle (profile Zielzeit)
+## Pump throttle (profile Target time)
 
-The throttle runs only while the pump profile **Zielzeit** is active; with any other profile it stays inactive (`reason` `profile`), so exactly one controller sets the pump per shot.
+The throttle runs only while the pump profile **Target time** is active; with any other profile it stays inactive (`reason` `profile`), so exactly one controller sets the pump per shot.
 
 A shot that would end at least **5 s before the target shot time** is slowed down while it runs, by lowering the pump power, so that it ends at the target shot time. Shots predicted between target − 5 s and the target are left alone; every shot starts at 100 %.
 
@@ -219,7 +219,7 @@ All from `tests/throttle_sim.py`, not from a machine.
 | Pump throttle floor | Number, 10–100 % of the pump entity's maximum (`value / max`, default 40), rounded up to the entity's next step; the entity's own `min` applies too. If brews are often marked `unreachable` with reason `floor`, lower it (as far as your pump still pumps). |
 | Standard pump power | Number (0.7.0), from the *Pump throttle floor* to 100 %, step 1, default 100: the power the profile **Standard** runs at in `throttle` mode (100 % = full power, as before; in `observe` only recorded; without a pump power entity no effect). Global, not per bean; read at the relay start, so a change takes effect with the next shot. Kept across restarts. A setting, not part of the profile definition: `export_profile` of Standard exports the definition at 100 %. |
 | Pump throttle learning | Switch (default off). |
-| Predicted shot time | Seconds, the running brew's prediction (written at most once a second). Attributes: `mode`, `pump_configured`, `stop_switch_configured`, `target_shot_time`, `last_reason` (why the last brew was not throttled: `no_target`, `no_relay_start`, `no_first_drop` (cup not tared), `timer_after_first_drop` (the scale timer started after the first drops), `no_pump`, `pump_unavailable`, `profile` (another pump profile than Zielzeit was active)), `prediction_exponent`, `prediction_exponent_samples`, `prediction_exponent_throttled_samples`. |
+| Predicted shot time | Seconds, the running brew's prediction (written at most once a second). Attributes: `mode`, `pump_configured`, `stop_switch_configured`, `target_shot_time`, `last_reason` (why the last brew was not throttled: `no_target`, `no_relay_start`, `no_first_drop` (cup not tared), `timer_after_first_drop` (the scale timer started after the first drops), `no_pump`, `pump_unavailable`, `profile` (another pump profile than Target time was active)), `prediction_exponent`, `prediction_exponent_samples`, `prediction_exponent_throttled_samples`. |
 | Last pump power | % (also what it would have set in `observe`). Attributes: the last brew's `mode`, `applied`, `triggered`, `unreachable`, `unreachable_reason`, `would_set`, `would_need_floor`, `grind_finer`, `target_time`, `predicted_at_trigger`, `end_shot_time`. |
 | Pump power exponent | Learned `γ` (diagnostic). |
 | Pump throttle learning samples | Diagnostic; attributes `journal_samples`, `journal_base_samples`. |
@@ -246,7 +246,7 @@ Every brew with a matched relay start, in any mode (also `off`), stores:
 With the mode not `off`, a brew also stores `throttle`:
 
 - Throttle fields: `mode`, `active`, `reason`, `target_time`, `applied`, `controlled` (0.7.0: the throttle controlled the pump — mode `throttle` and a usable pump entity — whether or not it wrote a value; the card's line style), `pump` (0.7.0: a *Pump power* entity was set up at the brew start; without one the `power` trace is an assumption, not set or read, and the card draws no band), `triggered`, `too_late`, `trigger_shot_time`, `predicted_at_trigger`, `prediction_exponent`, `unreachable`, `unreachable_reason`, `would_set`, `would_need_floor`, `grind_finer`, `end_shot_time`, `end_reason`, `power` (`[t, %]`, t in profile time), `learned`, `sample`, `sample_reason`.
-- Profile fields: `profile` (the active profile's label). For a profile run other than Zielzeit also `applied` (a value was written), `controlled` (0.7.0: the run controlled the pump), `power` (`[t, %]` on every change), `phases` (`[t, index, name, exit reason]`; reasons `volumetric`, `flow`, `ratio`, `duration`, `end`), `profile_end_reason` (`relay_off`, `relay_lost`, `cut`, `unloaded`, `options` (stop switch or pump entity changed), `mode`, `no_weight`, `error`), `profile_ignored_targets`, `first_drop_deadline`, `bloom_not_possible`, `scale_auto_stop_timing`, `reason` `profile` (or `no_pump` / `pump_unavailable` when a profile in `throttle` mode was only observed for lack of a usable pump entity) and `target_time` null. Without *Prepare brew*: `profile_reason` `not_prepared` and no trace.
+- Profile fields: `profile` (the active profile's label). For a profile run other than Target time also `applied` (a value was written), `controlled` (0.7.0: the run controlled the pump), `power` (`[t, %]` on every change), `phases` (`[t, index, name, exit reason]`; reasons `volumetric`, `flow`, `ratio`, `duration`, `end`), `profile_end_reason` (`relay_off`, `relay_lost`, `cut`, `unloaded`, `options` (stop switch or pump entity changed), `mode`, `no_weight`, `error`), `profile_ignored_targets`, `first_drop_deadline`, `bloom_not_possible`, `scale_auto_stop_timing`, `reason` `profile` (or `no_pump` / `pump_unavailable` when a profile in `throttle` mode was only observed for lack of a usable pump entity) and `target_time` null. Without *Prepare brew*: `profile_reason` `not_prepared` and no trace.
 
 The websocket API and the [brew-completed event](brews.md#event-difluid_scale_brew_completed) carry the same fields; `subscribe_live` has them as the current value `throttle` (with `profile`, the current `phase` and the power trace). The card draws the power in the pump band (dashed when observed), names the profile in the legend, marks the target shot time and uses the shot time for the time and the first drop (see [card](card.md#pump-power-band)).
 

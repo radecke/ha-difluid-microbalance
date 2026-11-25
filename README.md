@@ -15,7 +15,7 @@ A Home Assistant custom integration for the **DiFluid Microbalance** coffee scal
 - **Prepare brew:** a switch that puts the card into a ready view before the brew and gates the pump profiles.
 - **Auto-stop:** switches the espresso machine (any switch, e.g. its smart plug) off early enough that the cup ends on a target ratio (× the weighed dose) or a target yield. It learns its timing from every shot, measures the stop switch's delay, retries a failed switch-off and reports every attempt on an event entity and in repair issues.
 - **Bean profiles:** per coffee a target ratio for each pump profile (and optionally a target shot time); a bean remembers its pump profile. Pick the bean and profile and ratio follow.
-- **Pump profiles and pump throttle (experimental):** on machines whose pump power can be set from Home Assistant (a number entity, e.g. a dimmer in the pump circuit), shape the shot — gentle preinfusion, blooming, allongé, a lever-like decline, or your own profiles in a subset of the GaggiMate format — or slow down a shot that would end too early (profile *Zielzeit*). With the stop switch as the pump relay every brew also gets its real shot time.
+- **Pump profiles and pump throttle (experimental):** on machines whose pump power can be set from Home Assistant (a number entity, e.g. a dimmer in the pump circuit), shape the shot — gentle preinfusion, blooming, allongé, a lever-like decline, or your own profiles in a subset of the GaggiMate format — or slow down a shot that would end too early (profile *Target time*). With the stop switch as the pump relay every brew also gets its real shot time.
 - **Diagnostics** download, repair issues, automatic migration of older stores.
 
 Tested with model `DFT-S101`, firmware `V320` and `V326`.
@@ -134,7 +134,7 @@ flow_smoothing: 3                     # optional: seconds (0–10), 0 = raw scal
 - **Full screen** (`expand_when_active: true`): the card covers the dashboard view while ready or brewing and shrinks back when the brew is saved.
 - **Stored brews:** a calm smoothed flow line, bean and metrics, the target, **replay** in real time, and **delete** (with a confirmation in the card).
 - **Pump control:** the commanded pump power as a band under the chart (with a *Pump power* entity; dashed when only observed), and its value where you point when the pump was controlled.
-- **Profile preview:** a tile feature for the *Pump profile* select draws the selected profile under its dropdown (what ends each phase over the graph, the phase names under it); for *Zielzeit* it sets the target shot time, for *Standard* the Standard pump power instead; the brew ratio under it:
+- **Profile preview:** a tile feature for the *Pump profile* select draws the selected profile under its dropdown (what ends each phase over the graph, the phase names under it); for *Target time* it sets the target shot time, for *Standard* the Standard pump power instead; the brew ratio under it:
 
 ```yaml
 type: tile
@@ -261,19 +261,19 @@ cards:
 | Profile | Shape (untuned starting values) |
 |---|---|
 | `standard` — Standard | The *Standard pump power* for the whole shot (default 100 %: as without profiles) |
-| `soft_preinfusion` — Soft preinfusion / Sanfte Vorbrühung | 40 % until 2 g in the cup or 15 s, then a 4 s ramp to 100 % |
+| `soft_preinfusion` — Soft preinfusion | 40 % until 2 g in the cup or 15 s, then a 4 s ramp to 100 % |
 | `blooming` — Blooming | 100 % until the first drops or 12 s, pump off for 30 s, 5 s ramp into a flow target of 2.2 g/s |
 | `allonge` — Allongé | 100 % until the first drops or 12 s, then a flow target of 4.5 g/s (coarse grind, ~1:5) |
-| `lever` — Lever approximation / Hebel-Annäherung | 100 % until 4 g (at most 20 s), hold 8 s, then a 20 s decline to 60 % |
-| `target_time` — Target time / Zielzeit | 100 %, plus the **pump throttle** below |
+| `lever` — Lever approximation | 100 % until 4 g (at most 20 s), hold 8 s, then a 20 s decline to 60 % |
+| `target_time` — Target time | 100 %, plus the **pump throttle** below |
 
 Built-in profiles are stored, selected and exported by their id (0.7.0) and shown in Home Assistant's language (English or German); their old German labels are still accepted by the integration's services. **Coming from 0.7.0:** automations that call `select.select_option` with an old German label or compare the select's state with one must use the id — see [Upgrading](https://github.com/radecke/ha-difluid-microbalance/blob/main/docs/upgrading.md#upgrading-to-070b5-test-version). Imported profiles keep their label.
 
 The auto-stop still ends the shot; a profile only shapes the pump power on the way. Your own profiles are imported in a subset of the [GaggiMate profile format](https://docs.gaggimate.eu/docs/profiles/) (no pressure targets: there is no pressure sensor) with the [profile services](#services).
 
-**Prepare brew gate.** A profile runs only if the **Prepare brew** switch is **on when the pump relay goes on**; otherwise the shot runs at full power. This keeps flushes, rinsing and cleaning programs at full power. Turn the switch on before the shot, by hand or from an automation (e.g. the one that tares the cup). A skipped profile is shown on the card and stored with the brew (`not_prepared`). Zielzeit does not need the switch.
+**Prepare brew gate.** A profile runs only if the **Prepare brew** switch is **on when the pump relay goes on**; otherwise the shot runs at full power. This keeps flushes, rinsing and cleaning programs at full power. Turn the switch on before the shot, by hand or from an automation (e.g. the one that tares the cup). A skipped profile is shown on the card and stored with the brew (`not_prepared`). Target time does not need the switch.
 
-**Pump throttle (profile *Zielzeit*).** From the first drop + 3 s the throttle predicts when the auto-stop will cut. A shot that would end at least **5 s before the target shot time** (entity *Target shot time*, 10–90 s, default 30, or the bean's own) is slowed down by lowering the pump power so that it ends at the target. It never goes below the *Pump throttle floor* (default 40 %). With *Pump throttle learning* on it learns how your pump responds. A shot it found too fast shows **grind finer** on the card.
+**Pump throttle (profile *Target time*).** From the first drop + 3 s the throttle predicts when the auto-stop will cut. A shot that would end at least **5 s before the target shot time** (entity *Target shot time*, 10–90 s, default 30, or the bean's own) is slowed down by lowering the pump power so that it ends at the target. It never goes below the *Pump throttle floor* (default 40 %). With *Pump throttle learning* on it learns how your pump responds. A shot it found too fast shows **grind finer** on the card.
 
 For bloom profiles, turn off the scale's **Auto timer stop** (it may end the brew during the pause); a repair issue tells you when it is on, or when the pump entity cannot go to 0 %.
 
@@ -315,7 +315,7 @@ Own frontends can use the [websocket API](https://github.com/radecke/ha-difluid-
 - **Minimum Home Assistant version 2026.5.4.**
 - The learning store is converted to 1.4: the auto-stop model, its journal, the targets and bean profiles stay as they are. The pump throttle is added in mode `observe` with its start values, and the pump profile **Standard** is active. Without a *Pump power* entity nothing changes at the machine; with one, choose a profile and the mode yourself.
 - New: pump profiles and the pump throttle (entities, the option *Pump power*, the services `import_profile`, `export_profile`, `delete_profile`); built-in profiles are named by ids (`standard`, `soft_preinfusion`, `blooming`, `allonge`, `lever`, `target_time`) and shown in your language; bean profiles keep a target ratio per pump profile, remember their pump profile and can carry a target shot time (each bean's ratio becomes its ratio for *Standard*); every brew with a pump relay start stores its relay timing, and with a stop switch or pump entity the pump profile it ran with.
-- **Pump profiles need *Prepare brew*:** a profile runs only if the *Prepare brew* switch is on when the pump relay goes on; otherwise the shot runs at full power. Zielzeit is the exception ([details](#pump-profiles-and-pump-throttle-experimental)).
+- **Pump profiles need *Prepare brew*:** a profile runs only if the *Prepare brew* switch is on when the pump relay goes on; otherwise the shot runs at full power. Target time is the exception ([details](#pump-profiles-and-pump-throttle-experimental)).
 - **Check automations on the Auto-stop event entity.** `switch_failed` now means "the first attempt failed, still retrying", not a final state; the new event type `cut_failed` marks giving up after 2 minutes. Trigger on both, with `not_from: ["unavailable", "unknown"]` (see [the example](#notify-on-a-failed-cut)).
 - New repair issues: the auto-stop cannot / could not switch the machine off (`auto_stop_cut_failed*`: still trying, gave up, gave up with the pump set back to full power), and for bloom profiles the scale's auto stop timing is on or the pump entity cannot go to 0 % (`profile_bloom_*`).
 - New auto-stop behaviour: a failed cut is retried for 2 minutes, and a brew that passed its target during a Bluetooth gap is cut at once when the scale is back ([details](https://github.com/radecke/ha-difluid-microbalance/blob/main/docs/auto-stop.md#late-cuts-after-a-gap-in-the-scale-data)).
